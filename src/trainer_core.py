@@ -14,7 +14,7 @@ from attributes import ATTRIBUTES, NEGATIVE, SCOPE_CORRECTIONS, templates, valid
 from shop_addon import SHOP_FILENAME, safe_shop_entries
 from ballistic_addon import BALLISTIC_FILENAME, safe_ballistic_entries
 
-VERSION = '2.8.3'
+VERSION = '2.9.0'
 GAME = r'D:\Program Files (x86)\Steam\steamapps\common\Total War WARHAMMER III'
 PACK_NAME = 'zz_wh3_personal_trainer.pack'
 ROOT = Path(__file__).parent

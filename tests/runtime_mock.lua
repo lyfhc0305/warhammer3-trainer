@@ -132,6 +132,11 @@ local function widget(id,parent,template)
         for _,c in ipairs(self.children) do if not c.dead then c:PropagatePriority(v) end end
     end
     function w:SetDisabled(v) self.disabled=v end
+    -- Motion and highlight calls are recorded; a stale call is caught below like any other.
+    function w:TriggerAnimation(name) assert(type(name)=='string'); self.animations=self.animations or {}; self.animations[#self.animations+1]=name end
+    function w:SetOpacity(value,propagate) assert(type(value)=='number' and value>=0 and value<=255); self.opacity=value end
+    function w:StartPulseHighlight(brightness,state) self.pulsing=true end
+    function w:StopPulseHighlight(state) self.pulsing=false end
     -- Engine handles are raw pointers: a call after Destroy can crash and pcall
     -- cannot catch it, so record every such call for the harness to reject.
     for name,fn in pairs(w) do
@@ -192,6 +197,10 @@ function cm:callback(fn,delay) queue[#queue+1]=fn end
 campaign_timers={}
 function cm:remove_callback(name) campaign_timers[name]=nil end
 function cm:repeat_callback(fn,interval,name) campaign_timers[name]=fn end
+-- Real-time callbacks (UI motion, countdowns) run only when a test flushes them.
+real_queue={}
+function cm:real_callback(fn,interval,name) assert(type(interval)=='number' and interval>=0); real_queue[#real_queue+1]={fn=fn,ms=interval,name=name} end
+function flush_real() local q=real_queue; real_queue={}; for _,item in ipairs(q) do item.fn() end end
 function cm:char_lookup_str(cqi) return 'character_cqi:' .. tostring(cqi) end
 function cm:treasury_mod(name,amount)
     assert(name=='player')

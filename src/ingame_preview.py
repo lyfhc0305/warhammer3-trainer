@@ -28,8 +28,8 @@ SETUP_EFFECTS = [
 ]
 VIEWS = [
     ('总览', '总览'), ('内政', '内政与经济'), ('军队', '军队与将领'),
-    ('战斗', '手动战斗加成'), ('精英', '精英部队招募'), ('全部', '全部功能'),
-    ('sheet', '正在生效清单'), ('collapsed', '收起为侧栏'),
+    ('战斗', '手动战斗加成'), ('精英', '精英部队招募'), ('search', '跨页搜索'),
+    ('preset', '预设预览'), ('sheet', '正在生效与全关'), ('collapsed', '收起为侧栏'),
 ]
 NATIVE_INPUT = dict(fill=(14, 40, 51), line=(120, 76, 45), keyline=(6, 18, 24), text=(255, 248, 215))
 
@@ -105,6 +105,14 @@ def snapshot(lua_code, templates, view, env, effects=True, bundle_keys=()):
         api.click('collapse')
     elif view == 'sheet':
         api.click('rail_count')
+        api.click('clear')          # armed: the countdown button is part of the design
+    elif view == 'preset':
+        api.click('cmd_preset_campaign')
+    elif view == 'search':
+        api.click('tab_内政')
+        api.click('search_open')
+        g.widgets['wh3pt_search'].text = '加速'
+        api.click('search_go')
     elif view != 'closed':
         api.click('tab_' + view)
     panel = g.widgets['wh3pt_panel']

@@ -19,35 +19,48 @@ from ui_engine import FONT_SIZES, on_screen
 
 ROOT = Path(__file__).parent
 
-# Ink, copper and gold taken from the native HUD (input fill #0E2833, frame
-# #9D6B45, selection #195C79). These are on-screen colours: on_screen() converts
-# them to the template values that survive the engine's colour lift.
+# Design colours as seen on screen; on_screen() converts them to template values
+# that survive the engine's colour lift. Neutral near-black surfaces, near-white
+# text and one gold accent: solid gold is an action, a gold tint is "in effect".
 DESIGN = {
-    'Background': '#11161A',
-    'Side': '#0A0E11',
-    'Surface': '#182026',
-    'Raise': '#222D34',
-    'Hover': '#2E3F48',
-    'Divider': '#343F46',
-    'Line': '#46535B',
-    'Copper': '#C69259',
-    'TextMain': '#F4EBDB',
-    'Muted': '#C2BBAD',
-    'Quiet': '#938F86',
-    'Accent': '#E9AE5E',
-    'AccentInk': '#FFD48F',
-    'SelFill': '#143F4E',
-    'SelFillBg': '#2B2317',
-    'SelLine': '#D9A25A',
-    'Teal': '#46B4C8',
-    'Primary': '#46301D',
-    'PrimaryLine': '#B98346',
-    'PrimaryInk': '#FFE3B3',
-    'Danger': '#FF9F93',
-    'DangerFill': '#3A1714',
-    'DangerLine': '#A5443A',
+    'Background': '#141517',
+    'Side': '#0F1012',
+    'Surface': '#1B1C1F',
+    'Raise': '#232428',
+    'Hover': '#2B2D33',
+    'Divider': '#26292E',
+    'Line': '#3A3D44',
+    'LineStrong': '#4A4E57',
+    'TextMain': '#F2F1EC',
+    'Muted': '#A6A49C',
+    'Quiet': '#6F6E69',
+    'Accent': '#E6B45A',
+    'AccentInk': '#FFD98A',
+    'AccentFill': '#2A2419',
+    'AccentFlash': '#4A3C1E',
+    'AccentLine': '#B28C4B',
+    'PrimaryInk': '#1B1207',
+    'Danger': '#FF8F85',
+    'DangerFill': '#33201E',
+    'DangerLine': '#8A443D',
+    'DangerSolid': '#A3463E',
     'Ok': '#7EE0A4',
 }
+# Kept for callers that still name the old tokens.
+DESIGN['Copper'] = DESIGN['Line']
+DESIGN['SelFill'] = DESIGN['AccentFill']
+DESIGN['SelFillBg'] = DESIGN['AccentFill']
+DESIGN['SelLine'] = DESIGN['AccentLine']
+DESIGN['Teal'] = DESIGN['AccentLine']
+DESIGN['Primary'] = DESIGN['Accent']
+DESIGN['PrimaryLine'] = DESIGN['Accent']
+
+
+def _mix(colour, other, amount):
+    a, b = (int(colour[i:i + 2], 16) for i in (1, 3, 5)), (int(other[i:i + 2], 16) for i in (1, 3, 5))
+    return '#%02X%02X%02X' % tuple(int(round(x + (y - x) * amount)) for x, y in zip(a, b))
+
+
 PALETTE = {name: on_screen(colour) for name, colour in DESIGN.items()}
 
 
@@ -57,56 +70,100 @@ def _small(size):
     return FONT_SIZES[index - 1] if index else None
 
 
-# Button states: (fill_colour, text_colour, border_colour). Borderless buttons
-# are filled with the surface under them rather than relying on transparency, so
-# nothing about hit testing depends on how the engine treats image alpha.
+# Button states: (fill, text, border, shape). Borderless buttons are filled with
+# the surface under them rather than relying on transparency, so nothing about
+# hit testing depends on how the engine treats image alpha. Every base state
+# gets a hover and a down variant that the state transitions fade into.
 _BUTTON_BASE = {
-    'active': (PALETTE['Raise'], PALETTE['TextMain'], PALETTE['Line']),
-    'hover': (PALETTE['Hover'], PALETTE['AccentInk'], PALETTE['PrimaryLine']),
-    'down': (PALETTE['Surface'], PALETTE['Muted'], PALETTE['Line']),
-    'selected': (PALETTE['SelFill'], PALETTE['AccentInk'], PALETTE['Teal']),
-    'enabled': (PALETTE['SelFillBg'], PALETTE['AccentInk'], PALETTE['SelLine']),
-    'accent': (PALETTE['Primary'], PALETTE['PrimaryInk'], PALETTE['PrimaryLine']),
-    'danger': (PALETTE['DangerFill'], PALETTE['Danger'], PALETTE['DangerLine']),
-    'danger_solid': (PALETTE['DangerLine'], PALETTE['TextMain'], PALETTE['Danger']),
-    'ghost': (PALETTE['Side'], PALETTE['Muted'], None),
-    'ghost_page': (PALETTE['Background'], PALETTE['Muted'], None),
-    'ghost_card': (PALETTE['Surface'], PALETTE['Muted'], None),
-    'ghost_lit': (PALETTE['SelFillBg'], PALETTE['Muted'], None),
-    'star': (PALETTE['Surface'], PALETTE['Accent'], None),
-    'star_lit': (PALETTE['SelFillBg'], PALETTE['Accent'], None),
-    'inactive': (PALETTE['Surface'], PALETTE['Quiet'], PALETTE['Divider']),
+    'active': ('Raise', 'TextMain', 'Line', 'box'),
+    'selected': ('AccentFill', 'AccentInk', 'AccentLine', 'pill'),
+    'enabled': ('AccentFill', 'AccentInk', 'AccentLine', 'box'),
+    'accent': ('Accent', 'PrimaryInk', 'Accent', 'box'),
+    'danger': ('DangerFill', 'Danger', 'DangerLine', 'box'),
+    'danger_solid': ('DangerSolid', 'TextMain', 'Danger', 'box'),
+    'ghost': ('Side', 'Muted', None, 'pill'),
+    'ghost_page': ('Background', 'Muted', None, 'box'),
+    'ghost_card': ('Surface', 'Muted', None, 'box'),
+    'ghost_lit': ('AccentFill', 'Muted', None, 'box'),
+    'star': ('Surface', 'Accent', None, 'box'),
+    'star_lit': ('AccentFill', 'Accent', None, 'box'),
+    'chip': ('Raise', 'TextMain', 'Line', 'pill'),
+    'chip_on': ('AccentFill', 'AccentInk', 'AccentLine', 'pill'),
+    'inactive': ('Surface', 'Quiet', 'Divider', 'box'),
 }
-BUTTON_FONT = 12
-BUTTON_STATES = dict(_BUTTON_BASE)
-BUTTON_FONTS = {k: BUTTON_FONT for k in BUTTON_STATES}
 
-# Card states: (fill_colour, border_colour, text_colour). A border of None draws
-# the fill alone; PLAIN_CARDS have no corners, so they can shrink to a hairline.
+
+def _variant_names(state):
+    """Names of the hover and pressed variants of a base state."""
+    if state == 'active':
+        return 'hover', 'down'
+    return state + '_hover', state + '_down'
+
+
+def _button_states():
+    states = {}
+    for state, (fill, text, border, shape) in _BUTTON_BASE.items():
+        states[state] = (PALETTE[fill], PALETTE[text], PALETTE[border] if border else None, shape)
+        if state == 'inactive':
+            continue
+        hover, down = _variant_names(state)
+        lighter = _mix(DESIGN[fill], '#FFFFFF', 0.08)
+        darker = _mix(DESIGN[fill], '#000000', 0.12)
+        edge = _mix(DESIGN[border], '#FFFFFF', 0.18) if border else None
+        states[hover] = (on_screen(lighter), PALETTE[text], on_screen(edge) if edge else None, shape)
+        states[down] = (on_screen(darker), PALETTE[text], PALETTE[border] if border else None, shape)
+    return states
+
+
+BUTTON_FONT = 12
+BUTTON_STATES = _button_states()
+BUTTON_FONTS = {k: BUTTON_FONT for k in BUTTON_STATES}
+# Transitions between a base state and its variants: (from, to, event index, ms).
+# Event indices follow the native button templates: 0 mouse on, 1 mouse off,
+# 2 press, 3 release.
+TRANSITION_MASK = '64'   # colour only; shapes stay put
+
+
+def button_transitions():
+    result = {}
+    for state in _BUTTON_BASE:
+        if state == 'inactive':
+            continue
+        hover, down = _variant_names(state)
+        result[state] = [(None, hover, '120')]
+        result[hover] = [('1', state, '160'), ('2', down, '60')]
+        result[down] = [('1', state, '160'), ('3', hover, '100')]
+    return result
+
+
+# Card states: (fill, border, text). The panel background is the frame image
+# tinted with the hairline colour; dots and dividers are plain fills.
 CARD_STATES = {
     'active': (PALETTE['Surface'], PALETTE['Divider'], PALETTE['TextMain']),
     'panel_bg': (PALETTE['Background'], None, PALETTE['TextMain']),
     'rail_bg': (PALETTE['Side'], None, PALETTE['Muted']),
-    'raise': (PALETTE['Surface'], PALETTE['Line'], PALETTE['TextMain']),
-    'enabled': (PALETTE['SelFillBg'], PALETTE['SelLine'], PALETTE['AccentInk']),
-    'accent': (PALETTE['SelFill'], PALETTE['Teal'], PALETTE['AccentInk']),
+    'raise': (PALETTE['Raise'], PALETTE['LineStrong'], PALETTE['TextMain']),
+    'enabled': (PALETTE['AccentFill'], PALETTE['AccentLine'], PALETTE['AccentInk']),
+    'accent': (PALETTE['AccentFill'], PALETTE['AccentLine'], PALETTE['AccentInk']),
+    'flash': (PALETTE['AccentFlash'], PALETTE['Accent'], PALETTE['AccentInk']),
     'logo': (PALETTE['Side'], None, PALETTE['Accent']),
     'divider': (PALETTE['Divider'], None, PALETTE['Quiet']),
     'ok_dot': (PALETTE['Ok'], None, PALETTE['Ok']),
     'danger_dot': (PALETTE['Danger'], None, PALETTE['Danger']),
+    'busy_dot': (PALETTE['Accent'], None, PALETTE['Accent']),
 }
-PLAIN_CARDS = {'divider': 'solid', 'ok_dot': 'dot', 'danger_dot': 'dot'}
+PLAIN_CARDS = {'divider': 'solid', 'ok_dot': 'dot', 'danger_dot': 'dot', 'busy_dot': 'dot'}
 CARD_FONT = 12
 
-# Label states: (text_colour, font_size, halign). States above the smallest
-# verified font also get a *_sm variant one step down for text fitting.
+# Label states: (text colour, font px at 100%, alignment). Only the verified
+# even sizes; odd sizes collapse to a fallback font that ignores the UI scale.
 _LABEL_BASE = {
     'active': (PALETTE['TextMain'], '14', 'Left'),
     'body': (PALETTE['TextMain'], '12', 'Left'),
-    'title': (PALETTE['AccentInk'], '16', 'Left'),
+    'title': (PALETTE['TextMain'], '16', 'Left'),
     'title_center': (PALETTE['TextMain'], '14', 'Center'),
     'value': (PALETTE['AccentInk'], '18', 'Left'),
-    'section': (PALETTE['Accent'], '12', 'Left'),
+    'section': (PALETTE['Muted'], '12', 'Left'),
     'muted': (PALETTE['Muted'], '12', 'Left'),
     'quiet': (PALETTE['Quiet'], '12', 'Left'),
     'quiet_right': (PALETTE['Quiet'], '12', 'Right'),
@@ -126,6 +183,25 @@ LABEL_STATES.update({
 # Calibration probe: panel.lua expects exactly 14px for its 100% reference.
 LABEL_STATES['probe'] = (PALETTE['TextMain'], '14', 'Left')
 LABEL_STATES['hint'] = (PALETTE['Quiet'], '12', 'Left')
+
+# Entrance animations: a new list fades its rows in one after another. Each
+# in_k holds transparent for k steps, then fades over FADE_MS. Colour only, so a
+# build that ignores them shows the finished layout.
+STAGGER_STEPS, STAGGER_MS, FADE_MS = 8, 30, 220
+
+
+def entrance_animations():
+    result = {}
+    for k in range(STAGGER_STEPS):
+        frames = [dict(interpolationtime='0', interpolationpropertymask=TRANSITION_MASK, targetmetrics_m_colour='#FFFFFF00')]
+        if k:
+            frames.append(dict(interpolationtime=str(k * STAGGER_MS), interpolationpropertymask=TRANSITION_MASK,
+                               targetmetrics_m_colour='#FFFFFF00'))
+        frames.append(dict(interpolationtime=str(FADE_MS), interpolationpropertymask=TRANSITION_MASK,
+                           easing_curve_type='Quadratic Out'))
+        result['in_%d' % k] = frames
+    return result
+
 
 HINTS = {
     'vigour': '不累积疲劳，开战后清除开局疲劳',
@@ -173,27 +249,29 @@ def _clamp(value):
     return max(0.0, min(1.0, value))
 
 
-def _edge_depth(x, y, size, cut):
-    """Distance of a pixel inside a square with 45-degree cut corners (negative outside)."""
+def _edge_depth(x, y, size, radius):
+    """Distance of a pixel centre inside a square with rounded corners (negative outside)."""
     half = size / 2
-    ax, ay = abs(x + 0.5 - half), abs(y + 0.5 - half)
-    return -max(ax - half, ay - half, (ax + ay - (size - cut)) / math.sqrt(2))
+    qx, qy = abs(x + 0.5 - half) - (half - radius), abs(y + 0.5 - half) - (half - radius)
+    outside = math.hypot(max(qx, 0.0), max(qy, 0.0))
+    inside = min(max(qx, qy), 0.0)
+    return -(outside + inside - radius)
 
 
-PANEL_CUT = 6.0
+PANEL_RADIUS = 10.0
 
 
-def make_box_png(size=32, cut=3.0):
-    """White 9-slice fill with cut corners; the template colour tints it."""
+def make_box_png(size=32, radius=6.0):
+    """White 9-slice fill with rounded corners; the template colour tints it."""
     def pixel(x, y):
-        return 255, 255, 255, int(round(_clamp(_edge_depth(x, y, size, cut) + 0.5) * 255))
+        return 255, 255, 255, int(round(_clamp(_edge_depth(x, y, size, radius) + 0.5) * 255))
     return encode_png(size, size, pixel)
 
 
-def make_edge_png(size=32, cut=3.0, thickness=1.0):
+def make_edge_png(size=32, radius=6.0, thickness=1.0):
     """White 9-slice outline matching make_box_png."""
     def pixel(x, y):
-        depth = _edge_depth(x, y, size, cut)
+        depth = _edge_depth(x, y, size, radius)
         return 255, 255, 255, int(round(_clamp(depth + 0.5) * _clamp(thickness - depth + 0.5) * 255))
     return encode_png(size, size, pixel)
 
@@ -210,44 +288,30 @@ def make_dot_png(size=16):
     return encode_png(size, size, pixel)
 
 
-def make_frame_png(size=64, cut=PANEL_CUT):
-    """Panel frame as a gray mask for the Copper tint: black keyline, lit band, inner hairline."""
-    shades = dict(top=255, left=216, right=176, bottom=142)
-
-    def band(depth, near, far):
-        return _clamp(depth - near + 0.5) * _clamp(far - depth + 0.5)
-
-    def pixel(x, y):
-        depth = _edge_depth(x, y, size, cut)
-        side = min((y, 'top'), (x, 'left'), (size - 1 - x, 'right'), (size - 1 - y, 'bottom'))[1]
-        lit, thin = band(depth, 1, 3), band(depth, 4, 5) * 0.4
-        dark = _clamp(depth + 0.5) * (band(depth, -1, 1) + band(depth, 3, 4))
-        cover = _clamp(lit + thin + dark)
-        grey = int(round(shades[side] * (lit + thin) / cover)) if cover else 0
-        return grey, grey, grey, int(round(cover * 255))
-    return encode_png(size, size, pixel)
-
-
-# Every image is a white or gray mask tinted by its template colour: that is the
-# path the colour measurements cover, so the palette holds for the frame too.
+# Every image is a white mask tinted by its template colour: that is the path
+# the colour measurements cover, so the palette holds for the frame too.
 UI_IMAGES = {
-    'box': make_box_png, 'edge': make_edge_png, 'solid': make_solid_png, 'dot': make_dot_png,
-    'panel': lambda: make_box_png(64, PANEL_CUT), 'frame': make_frame_png,
+    'box': make_box_png, 'edge': make_edge_png,
+    'pill': lambda: make_box_png(32, 11.0), 'pill_edge': lambda: make_edge_png(32, 11.0),
+    'solid': make_solid_png, 'dot': make_dot_png,
+    'panel': lambda: make_box_png(64, PANEL_RADIUS), 'frame': lambda: make_edge_png(64, PANEL_RADIUS),
 }
 # Margins of the 9-slice images; the engine scales them with the UI scale, so a
 # component smaller than twice the margin breaks up (see ui_engine.py).
-UI_MARGINS = {'box': 8, 'edge': 8, 'panel': 20, 'frame': 20}
+UI_MARGINS = {'box': 8, 'edge': 8, 'pill': 11, 'pill_edge': 11, 'panel': 20, 'frame': 20}
+BUTTON_IMAGES = ('box', 'edge', 'pill', 'pill_edge')
+CARD_IMAGES = ('box', 'edge', 'panel', 'frame', 'solid', 'dot')
 
 
 def _state_layers(kind, state):
     """(image, colour) stack and text settings of one template state."""
     if kind == 'button':
-        fill, text, border = BUTTON_STATES[state]
-        layers = [('box', fill)] + ([('edge', border)] if border else [])
+        fill, text, border, shape = BUTTON_STATES[state]
+        layers = [(shape, fill)] + ([(shape + '_edge' if shape == 'pill' else 'edge', border)] if border else [])
         return layers, text, str(BUTTON_FONTS[state]), 'Center'
     fill, border, text = CARD_STATES[state]
     if state == 'panel_bg':
-        layers = [('panel', fill), ('frame', PALETTE['Copper'])]
+        layers = [('panel', fill), ('frame', PALETTE['Line'])]
     elif state in PLAIN_CARDS:
         layers = [(PLAIN_CARDS[state], fill)]
     else:
@@ -256,7 +320,7 @@ def _state_layers(kind, state):
 
 
 def ui_template(kind):
-    """Layout with 9-slice surfaces and multi-state typography."""
+    """Layout with 9-slice surfaces, multi-state typography, hover transitions and entrance animations."""
     def guid(name):
         return str(uuid.uuid5(uuid.NAMESPACE_URL, 'wh3pt/' + kind + '/' + name)).upper()
 
@@ -265,7 +329,8 @@ def ui_template(kind):
     root = ET.SubElement(hierarchy, 'root', this=guid('root'))
     ET.SubElement(root, kind, this=guid(kind))
     components = ET.SubElement(layout, 'components')
-    images = {'button': ('box', 'edge'), 'card': ('box', 'edge', 'panel', 'frame', 'solid', 'dot')}.get(kind, ())
+    images = {'button': BUTTON_IMAGES, 'card': CARD_IMAGES}.get(kind, ())
+    transitions = button_transitions() if kind == 'button' else {}
     for name in ['root', kind]:
         node = ET.SubElement(
             components, name, this=guid(name), id=name, uniqueguid=guid(name),
@@ -316,6 +381,15 @@ def ui_template(kind):
                         dockpoint='Center', canresizewidth='true', canresizeheight='true',
                         colour=colour, **extra,
                     )
+                if state in transitions:
+                    tmap = ET.SubElement(st, 'transitionmap')
+                    for index, target, ms in transitions[state]:
+                        t_attrs = dict(transition_m_target_state=guid(name + target),
+                                       transition_m_transition_time=ms,
+                                       transition_m_interpolation_property_mask=TRANSITION_MASK)
+                        if index is not None:
+                            t_attrs['index'] = index
+                        ET.SubElement(tmap, 'transition', **t_attrs)
             elif is_target and kind == 'label':
                 text_colour, font_size, halign = LABEL_STATES[state]
             else:
@@ -326,6 +400,13 @@ def ui_template(kind):
                 texthalign=halign, texthbehaviour='Never split',
                 font_m_size=font_size, font_m_colour=text_colour, font_m_leading='2', fontcat_name='body_14',
             )
+        if is_target:
+            animations = ET.SubElement(node, 'animations')
+            for anim_name, frames in entrance_animations().items():
+                anim = ET.SubElement(animations, anim_name, id=anim_name)
+                block = ET.SubElement(anim, 'frames')
+                for frame in frames:
+                    ET.SubElement(block, 'frame', **frame)
     return ET.tostring(layout, encoding='utf-8', xml_declaration=True)
 
 
@@ -373,6 +454,8 @@ def ui_files(catalog, strategic=None, game=GAME):
         + (ROOT / 'ingame/mortarchs.lua').read_text(encoding='utf-8') + '\n'
         + (ROOT / 'ingame/income.lua').read_text(encoding='utf-8') + '\n'
         + (ROOT / 'ingame/elite_tabs.lua').read_text(encoding='utf-8') + '\n'
+        + (ROOT / 'ingame/kit.lua').read_text(encoding='utf-8') + '\n'
+        + (ROOT / 'ingame/views.lua').read_text(encoding='utf-8') + '\n'
         + (ROOT / 'ingame/panel.lua').read_text(encoding='utf-8')
     ).encode('utf-8')}
     files['script\\battle\\mod\\wh3pt_battle.lua'] = (ROOT / 'ingame/battle.lua').read_bytes()
