@@ -1,0 +1,14 @@
+# Local builds and generated files
+/build/
+/dist/
+/output/
+__pycache__/
+*.pyc
+*.exe
+*.spec
+*.log
+._*
+
+# Local settings and install backups
+/settings.json
+/history/
