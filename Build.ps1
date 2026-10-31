@@ -17,13 +17,14 @@ function Package($name, $entry) {
         --hidden-import compression.zstd "src\$entry.py"
     if ($LASTEXITCODE -ne 0) { throw "Packaging failed: $name" }
 }
-Package '战锤3修改器' 'app'
+# The desktop console ("战锤3修改器.exe") is retired; drop one left by an older build.
+if (Test-Path -LiteralPath 'dist\战锤3修改器.exe') { Remove-Item -LiteralPath 'dist\战锤3修改器.exe' -Force }
 Package '战锤3内置修改器安装器' 'ingame_installer'
 
 Copy-Item -LiteralPath reference -Destination dist -Recurse -Force
 Copy-Item -LiteralPath docs -Destination dist -Recurse -Force
 
-# A frozen exe can fail where the source runs: each one rebuilds the Pack by itself.
+# A frozen exe can fail where the source runs: the exe rebuilds the Pack by itself.
 foreach ($exe in Get-ChildItem -LiteralPath dist -Filter *.exe) {
     $report = Join-Path $PSScriptRoot "build\smoke-$($exe.BaseName).json"
     if (Test-Path -LiteralPath $report) { Remove-Item -LiteralPath $report }

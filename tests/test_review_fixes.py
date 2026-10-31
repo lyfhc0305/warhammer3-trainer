@@ -1,59 +1,25 @@
-import json
+"""Checks of trainer_core.build that came out of a review."""
 from pathlib import Path
 import shutil
 import tempfile
 import unittest
-from unittest.mock import patch
-import app
 from trainer_core import build, GAME, Options
 from pack_io import read_pack, write_pack
 from database import decode
+from tests import REFERENCE
 
 
 class ReviewFixTests(unittest.TestCase):
-    def test_disabled_invalid_basic_fields_and_draft_roundtrip(self):
-        with tempfile.TemporaryDirectory() as tmp, patch.object(app, 'STATE', Path(tmp)/'settings.json'):
-            window = app.App(); window.withdraw()
-            try:
-                window.clear()
-                for _, control, _ in window.basic_numbers(): control.set('')
-                window.attribute_options['ward'][0].set(True)
-                window.attribute_options['ward'][1].set('45')
-                opts = window.collect_options(); opts.validate()
-                build(GAME,opts,local_dir=app.REFERENCE)
-                window.options['regeneration'].set(True)
-                with self.assertRaisesRegex(ValueError,'有效数值'): window.collect_options()
-                window.attribute_options['ward'][1].set('incomplete')
-                window.save()
-                data = json.loads(app.STATE.read_text(encoding='utf-8'))
-                self.assertEqual(data['basic_controls']['heal_percent'],'')
-                self.assertEqual(data['attribute_controls']['ward']['value'],'incomplete')
-                window.destroy()
-                window = app.App(); window.withdraw()
-                self.assertEqual(window.heal.get(),'')
-                self.assertTrue(window.options['regeneration'].get())
-                self.assertEqual(window.attribute_options['ward'][1].get(),'incomplete')
-            finally: window.destroy()
-
-    def test_failed_save_does_not_silently_close(self):
-        with tempfile.TemporaryDirectory() as tmp, patch.object(app,'STATE',Path(tmp)/'state.json'):
-            window=app.App(); window.withdraw()
-            try:
-                with patch.object(window,'save',side_effect=OSError('disk full')), patch.object(app.messagebox,'showerror') as error:
-                    window.close()
-                    self.assertTrue(window.winfo_exists()); error.assert_called_once()
-            finally: window.destroy()
-
     def test_unselected_corrupt_pack_isolated_but_selected_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp)
-            shutil.copy2(app.REFERENCE/'@玩家部队33特保.pack',root)
+            shutil.copy2(REFERENCE/'@玩家部队33特保.pack',root)
             (root/'bad.pack').write_bytes(write_pack({'db\\campaign_difficulty_handicap_effects_tables\\bad':b'\x01'}))
             _, report=build(GAME,Options(attributes={'ward':45}),local_dir=root)
             self.assertTrue(any('bad.pack' in w for w in report['warnings']))
             with self.assertRaises(Exception): build(GAME,Options(local_mods=['bad.pack']),local_dir=root)
 
-    def test_desktop_restoration_build_drops_reference_cooldown_and_combat_potential(self):
+    def test_restoration_build_drops_reference_cooldown_and_combat_potential(self):
         cases=[
             ('healing',Options(regeneration=True),.125,0,False),
             ('revive',Options(regeneration=True,resurrection=True),.125,0,True),
@@ -62,7 +28,7 @@ class ReviewFixTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             for feature,opts,heal,ammo,resurrect in cases:
                 with self.subTest(feature=feature):
-                    payload,_=build(GAME,opts,local_dir=app.REFERENCE)
+                    payload,_=build(GAME,opts,local_dir=REFERENCE)
                     p=Path(tmp)/(feature+'.pack'); p.write_bytes(payload)
                     files=read_pack(p)
                     phase_rows=[]; ability_rows=[]; junction_rows=[]

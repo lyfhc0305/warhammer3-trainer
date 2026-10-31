@@ -17,6 +17,7 @@ from ballistic_addon import BALLISTIC_FILENAME, safe_ballistic_entries
 VERSION = '2.9.0'
 GAME = r'D:\Program Files (x86)\Steam\steamapps\common\Total War WARHAMMER III'
 PACK_NAME = 'zz_wh3_personal_trainer.pack'
+CAP_VALUE_RANGE = (0, 100000000)  # healing_percentage_cap, as a multiple of unit health
 ROOT = Path(__file__).parent
 FROZEN = getattr(sys, 'frozen', False)
 # Frozen: beside the exe, with bundled data unpacked to ROOT. From source: the repository.
@@ -38,11 +39,6 @@ EFFECTS = {
     'foreign_replenishment': 'wh2_twa03_effect_blood_voyage_foreign_replenishment',
     'replenishment_cap': 'wh_main_ignore_replenishment_cap',
 }
-LEGACY_RECOVERY_PRESETS = frozenset({
-    '@10倍回血复活每3秒60回血5%弹药200魔风上限.pack',
-    '@10倍回血复活每3秒90回血20%弹药500魔风上限.pack',
-    '@10倍回血复活每3秒120回血50%弹药1000魔风上限.pack',
-})
 # These exact source->target layouts were inspected against the local game.
 REVIEWED_MIGRATIONS = frozenset({
     ('special_ability_phases_tables', 41, 44),
@@ -167,7 +163,7 @@ class Options:
     foreign_value: float = 100.0
 
     def validate(self):
-        for name, low, high in [('cap_value', 0, 100000000), ('heal_percent', 0.01, 100), ('ammo_percent', 0, 100), ('reload_value', 0, 500), ('foreign_value', 0, 500)]:
+        for name, low, high in [('cap_value', *CAP_VALUE_RANGE), ('heal_percent', 0.01, 100), ('ammo_percent', 0, 100), ('reload_value', 0, 500), ('foreign_value', 0, 500)]:
             value = getattr(self, name)
             if not isinstance(value, (float, int)) or not math.isfinite(value) or not low <= value <= high:
                 raise ValueError(f'{name} 必须在 {low}～{high} 之间')
@@ -301,37 +297,11 @@ def build(game, options, workshop=None, local_dir=None):
             ballistic_migrations.append(ballistic_report)
             skipped = sum(len(v) for v in ballistic_report['unmigrated_legacy_keys'].values())
             warnings.append(f'弹道包仅向当前原生已有记录移植白名单数值与友伤开关；保留当前合法引用/枚举/新增字段；{skipped} 个未核验旧独有键未合并，可能同时影响敌方，实际游戏表现待验证。')
-        has_sss = any('SSS_force'.encode() in b for n, b in entries.items() if 'campaign_difficulty_handicap' in n)
-        normalize_legacy = filename in LEGACY_RECOVERY_PRESETS
-        if normalize_legacy and not has_sss:
-            raise ValueError('旧复合预设内容已变化，请重新检查：' + filename)
-        if has_sss:
-            if ability:
-                raise ValueError('回血预设与基础回血/复活/弹药/装填功能请二选一')
-            warnings.append(filename + '：只保留自定义 SSS 能力，已排除旧包中的游戏原生能力覆盖。')
-            if normalize_legacy:
-                warnings.append(filename + '：SSS 改为单位自身恢复，已排除友军光环叠加与附带冷却/战力字段；保留回复比例、复活补弹、冻结疲劳和明确战斗属性。')
         for name, data in entries.items():
             if name.endswith('.rpfm_reserved'):
                 continue
             if name.startswith('db\\'):
                 table = name.split('\\')[1]
-                version, rows = decode(table, data)
-                if normalize_legacy and table == '_kv_winds_of_magic_params_tables':
-                    # This changes only the campaign UI range, not actual winds.
-                    # Keep any unrelated rows if a reference gains real settings.
-                    rows = [r for r in rows if r['key'] != 'campaign_ui_max_depletion_modifier']
-                    if not rows:
-                        continue
-                    data = encode(table, version, rows)
-                if table == 'unit_special_abilities_tables' and len(rows) > 100:
-                    rows = [r for r in rows if r['key'] == 'SSS']
-                    if len(rows) != 1:
-                        raise ValueError('预设自定义能力不明确')
-                    data = encode(table, version, rows)
-                if normalize_legacy:
-                    self_restoration_rows(table, rows, 'SSS')
-                    data = encode(table, version, rows)
                 # An explicitly selected cap overrides the bundled cap parameter.
                 if table == '_kv_unit_ability_scaling_rules_tables' and options.cap:
                     continue
@@ -342,11 +312,6 @@ def build(game, options, workshop=None, local_dir=None):
             if name in files and files[name] != data:
                 raise ValueError('所选 Mod 包含冲突文件：' + name)
             files[name] = data
-        if normalize_legacy:
-            # Legacy presets describe one ammo grant every three seconds.
-            # Leave their healing, resurrection, fatigue and stat phase intact.
-            separate_repeating_ammo(files, 'SSS', 'wh3pt_legacy_ammo', 3, 1910402)
-            warnings.append(filename + '：补弹已拆为每3秒原生循环的自身被动，原回血与复活阶段保持独立。')
     # Merge handicap rows by their actual composite key. Reject conflicting presets.
     handicap = 'campaign_difficulty_handicap_effects_tables'
     merged, handicap_version = {}, 0

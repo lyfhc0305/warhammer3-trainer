@@ -6,7 +6,7 @@ from lupa.lua51 import LuaRuntime
 from tests import ROOT, SRC, REFERENCE
 from build_ingame import build_ingame, mock_font_lua
 from trainer_core import GAME
-from game_compat import game_version
+from game_compat import game_version, manifest_addons, read_manifest
 from pack_io import read_pack
 from database import decode
 from ingame_installer import verify_game
@@ -1824,6 +1824,10 @@ class InGameTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             p=Path(tmp)/'addons.pack'; p.write_bytes(payload)
             files=read_pack(p)
+            self.assertEqual(manifest_addons(read_manifest(p)),{
+                'enabled':['building','ai','cap','agent_ai','shop','ballistic'],
+                'values':{'cap_value':888.0,'agent_ai_value':50.0}})
+            self.assertEqual(report['addon_values'],{'cap_value':888.0,'agent_ai_value':50.0})
             self.assertTrue(any('_kv_unit_ability_scaling_rules_tables' in k for k in files))
             self.assertTrue(any('campaign_difficulty_handicap_effects_tables' in k for k in files))
             self.assertTrue(any('projectiles_tables' in k for k in files))

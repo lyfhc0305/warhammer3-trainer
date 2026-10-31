@@ -1,4 +1,4 @@
-"""Shared Tkinter UI kit for the WH3 trainer desktop apps.
+"""Tkinter UI kit for the WH3 trainer installer.
 
 Design language: dark obsidian surfaces, imperial-gold accent, flat cards with
 anti-aliased rounded controls. All controls are DPI aware: pixel sizes go
@@ -6,7 +6,7 @@ through ``px()`` and fonts use point sizes that Tk scales automatically once
 the process is DPI aware (see ``enable_dpi_awareness``).
 
 Rounded shapes are rendered to small RGBA PNGs in pure Python (no Pillow), so
-the frozen executables stay small and everything stays crisp at 125%–200%.
+the frozen executable stays small and everything stays crisp at 125%–200%.
 """
 import base64
 import math
@@ -18,10 +18,8 @@ import tkinter as tk
 import tkinter.font as tkfont
 
 FONT = 'Microsoft YaHei UI'
-MONO = 'Consolas'
 
-# Design tokens. The legacy keys (bg/card/raise/gold/red/...) are kept because
-# ingame_installer.detect_installed_mode and older callers rely on them.
+# Design tokens.
 THEME = {
     'bg': '#15110e',
     'side': '#0f0c0a',
@@ -36,19 +34,16 @@ THEME = {
     'quiet': '#8a7a69',
     'faint': '#5f5347',
     'gold': '#e2b04f',
-    'blue': '#e2b04f',
     'gold_hover': '#efc46c',
     'gold_ink': '#f3c86f',
     'gold_dim': '#3a2b16',
     'primary_ink': '#1b1207',
-    'sel_fill': '#2a1f13',
     'sel_line': '#a67c32',
     'green': '#7ec89a',
     'ok_bg': '#16261b',
     'info_bg': '#33261a',
     'red': '#e8766e',
     'danger_bg': '#321918',
-    'danger_hover': '#43201e',
     'danger_line': '#7d3530',
     'input_bg': '#110e0b',
     'track': '#3a3027',
@@ -102,16 +97,13 @@ def setup(root):
         'body': tkfont.Font(root, family=FONT, size=10),
         'body_b': tkfont.Font(root, family=FONT, size=10, weight='bold'),
         'em': tkfont.Font(root, family=FONT, size=11, weight='bold'),
-        'h2': tkfont.Font(root, family=FONT, size=13, weight='bold'),
         'h1': tkfont.Font(root, family=FONT, size=16, weight='bold'),
-        'mono': tkfont.Font(root, family=MONO, size=10),
     }
     families = set(tkfont.families(root))
     icon_family = next((f for f in ('Segoe Fluent Icons', 'Segoe MDL2 Assets') if f in families), None)
     root._kit_icon_family = icon_family
     if icon_family:
         root._kit_fonts['icon'] = tkfont.Font(root, family=icon_family, size=11)
-        root._kit_fonts['icon_sm'] = tkfont.Font(root, family=icon_family, size=9)
         root._kit_fonts['icon_lg'] = tkfont.Font(root, family=icon_family, size=18)
     return root
 
@@ -122,32 +114,9 @@ def font(widget, name):
 
 # Segoe Fluent / MDL2 code points with plain-text fallbacks.
 ICONS = {
-    'game': ('\ue7fc', '◆'),
-    'globe': ('\ue909', '◎'),
-    'shield': ('\uea18', '◈'),
-    'health': ('\ue95e', '✚'),
-    'tune': ('\ue9e9', '≡'),
-    'star': ('\ue734', '☆'),
-    'star_on': ('\ue735', '★'),
-    'check': ('\ue73e', '✓'),
-    'list': ('\ue8fd', '≡'),
-    'doc': ('\ue7c3', '▤'),
-    'settings': ('\ue713', '⚙'),
-    'search': ('\ue721', '⌕'),
-    'close': ('\ue711', '×'),
-    'folder': ('\ue8b7', '▣'),
-    'play': ('\ue768', '▶'),
-    'download': ('\ue896', '↓'),
-    'delete': ('\ue74d', '×'),
-    'refresh': ('\ue72c', '↻'),
-    'info': ('\ue946', 'i'),
-    'chevron_down': ('\ue70d', '▾'),
-    'chevron_up': ('\ue70e', '▴'),
-    'warning': ('\ue7ba', '!'),
-    'error': ('\uea39', '!'),
-    'accept': ('\ue8fb', '✓'),
-    'package': ('\ue7b8', '▦'),
-    'flash': ('\ue945', '⚡'),
+    'info': ('', 'i'),
+    'warning': ('', '!'),
+    'accept': ('', '✓'),
 }
 
 
@@ -273,11 +242,9 @@ def disc(widget, d, fill, ring=None, ring_w=2.0):
     return _image(widget, ('disc', fill, ring, rw), d, d, layers)
 
 
-def switch_image(widget, on, hover=False, disabled=False):
+def switch_image(widget, on, hover=False):
     w, h = px(38), px(22)
-    if disabled:
-        track, knob = THEME['divider'], THEME['faint']
-    elif on:
+    if on:
         track, knob = (THEME['gold_hover'] if hover else THEME['gold']), THEME['primary_ink']
     else:
         track, knob = ('#463a2f' if hover else THEME['track']), THEME['muted']
@@ -288,7 +255,7 @@ def switch_image(widget, on, hover=False, disabled=False):
         kr = r - pad
         kx = (w_ - r) if on else r
         return [(_rrect(0, 0, w_, h_, r), track, 1.0), (_circle(kx, r, kr), knob, 1.0)]
-    return _image(widget, ('switch', on, hover, disabled), w, h, layers)
+    return _image(widget, ('switch', on, hover), w, h, layers)
 
 
 # ---------------------------------------------------------------------------
@@ -308,20 +275,15 @@ class Button(tk.Label):
         'primary': ('gold', 'gold_hover', 'primary_ink', None),
         'secondary': ('raise', 'hover', 'ink', 'frame'),
         'ghost': (None, 'raise', 'muted', None),
-        'danger': ('danger_bg', 'danger_hover', 'red', 'danger_line'),
-        'chip': ('raise', 'hover', 'muted', 'border'),
-        'chip_on': ('gold_dim', 'sel_fill', 'gold_ink', 'sel_line'),
     }
     SIZES = {'sm': (28, 10, 'sm'), 'md': (34, 14, 'body_b'), 'lg': (42, 20, 'em')}
 
-    def __init__(self, parent, text, command=None, variant='secondary', size='md', icon=None,
-                 min_width=0, tooltip=None):
+    def __init__(self, parent, text, command=None, variant='secondary', size='md', min_width=0):
         super().__init__(parent, bd=0, highlightthickness=0, padx=0, pady=0, compound='center',
                          cursor='hand2', bg=bg_of(parent))
         self.command = command
         self.variant = variant
         self.size = size
-        self.icon = icon
         self.min_width = min_width
         self.text_value = text
         self.enabled = True
@@ -331,14 +293,11 @@ class Button(tk.Label):
         self.bind('<Leave>', self._leave)
         self.bind('<ButtonPress-1>', self._press)
         self.bind('<ButtonRelease-1>', self._release)
-        if tooltip:
-            Tooltip(self, tooltip)
         self._render()
 
     def _render(self):
         h, pad, font_name = self.SIZES[self.size]
         f = font(self, font_name)
-        # A Tk label renders with one font, so symbol-font icons are not mixed into text buttons.
         label = self.text_value
         text_w = f.measure(label or '')
         w = max(px(self.min_width), text_w + px(pad) * 2, px(h))
@@ -394,47 +353,12 @@ class Button(tk.Label):
         self.text_value = text
         self._render()
 
-    def set_variant(self, variant):
-        self.variant = variant
-        self._render()
-
     def set_enabled(self, enabled):
         self.enabled = bool(enabled)
         self._render()
 
     def set_command(self, command):
         self.command = command
-
-
-class IconButton(tk.Label):
-    """Borderless glyph button (star, close, clear...)."""
-
-    def __init__(self, parent, icon, command=None, fg=None, hover_fg=None, tooltip=None, size='icon'):
-        glyph, f = icon_text(parent, icon)
-        if size == 'icon_sm' and getattr(parent.winfo_toplevel(), '_kit_icon_family', None):
-            f = font(parent, 'icon_sm')
-        super().__init__(parent, text=glyph, font=f, bg=bg_of(parent), fg=fg or THEME['quiet'],
-                         cursor='hand2', bd=0, padx=px(4), pady=px(2))
-        self.icon = icon
-        self.command = command
-        self.base_fg = fg or THEME['quiet']
-        self.hover_fg = hover_fg or THEME['ink']
-        self.bind('<Enter>', lambda _e: self.configure(fg=self.hover_fg))
-        self.bind('<Leave>', lambda _e: self.configure(fg=self.base_fg))
-        self.bind('<ButtonRelease-1>', self._click)
-        if tooltip:
-            Tooltip(self, tooltip)
-
-    def _click(self, event):
-        if 0 <= event.x <= self.winfo_width() and 0 <= event.y <= self.winfo_height() and self.command:
-            self.command()
-
-    def set_icon(self, icon, fg=None):
-        glyph, _f = icon_text(self, icon)
-        self.icon = icon
-        if fg:
-            self.base_fg = fg
-        self.configure(text=glyph, fg=self.base_fg)
 
 
 class Switch(tk.Label):
@@ -445,7 +369,6 @@ class Switch(tk.Label):
         self.variable = variable
         self.command = command
         self.hover = False
-        self.enabled = True
         self.bind('<Enter>', lambda _e: self._set_hover(True))
         self.bind('<Leave>', lambda _e: self._set_hover(False))
         self.bind('<ButtonRelease-1>', self._click)
@@ -461,11 +384,9 @@ class Switch(tk.Label):
             on = bool(self.variable.get())
         except Exception:
             on = False
-        self.configure(image=switch_image(self, on, self.hover, not self.enabled))
+        self.configure(image=switch_image(self, on, self.hover))
 
     def _click(self, event):
-        if not self.enabled:
-            return
         if 0 <= event.x <= self.winfo_width() and 0 <= event.y <= self.winfo_height():
             self.toggle()
 
@@ -473,11 +394,6 @@ class Switch(tk.Label):
         self.variable.set(not self.variable.get())
         if self.command:
             self.command()
-
-    def set_enabled(self, enabled):
-        self.enabled = bool(enabled)
-        self.configure(cursor='hand2' if enabled else 'arrow')
-        self._render()
 
     def destroy(self):
         try:
@@ -487,81 +403,21 @@ class Switch(tk.Label):
         super().destroy()
 
 
-class Slider(tk.Canvas):
-    """Flat slider: thin track, gold fill and a round knob. Emits on user drag only."""
-
-    def __init__(self, parent, minimum, maximum, on_user_change, width=170):
-        self.h = px(24)
-        super().__init__(parent, width=px(width), height=self.h, bg=bg_of(parent),
-                         highlightthickness=0, bd=0, cursor='hand2')
-        self.minimum = float(minimum)
-        self.maximum = float(maximum)
-        self.on_user_change = on_user_change
-        self.value = self.minimum
-        self.active = False
-        self.knob_d = px(16)
-        self.pad = self.knob_d // 2 + 1
-        self.bind('<Configure>', lambda _e: self.redraw())
-        self.bind('<ButtonPress-1>', self._drag)
-        self.bind('<B1-Motion>', self._drag)
-
-    def set_value(self, value):
-        try:
-            self.value = max(self.minimum, min(self.maximum, float(value)))
-        except (TypeError, ValueError):
-            pass
-        self.redraw()
-
-    def set_active(self, active):
-        self.active = bool(active)
-        self.redraw()
-
-    def _fraction(self):
-        span = self.maximum - self.minimum
-        return 0.0 if span <= 0 else (self.value - self.minimum) / span
-
-    def redraw(self):
-        self.delete('all')
-        w = max(self.winfo_width(), int(self.cget('width')))
-        if w <= 2 * self.pad:
-            return
-        cy = self.h // 2
-        x0, x1 = self.pad, w - self.pad
-        th = max(2, px(4))
-        self.create_rectangle(x0, cy - th // 2, x1, cy - th // 2 + th, fill=THEME['track'], width=0)
-        kx = x0 + (x1 - x0) * self._fraction()
-        fill = THEME['gold'] if self.active else THEME['frame']
-        self.create_rectangle(x0, cy - th // 2, kx, cy - th // 2 + th, fill=fill, width=0)
-        knob = disc(self, self.knob_d, THEME['ink'] if self.active else THEME['muted'],
-                    ring=THEME['gold'] if self.active else THEME['frame'], ring_w=2.5)
-        self.create_image(kx, cy, image=knob)
-
-    def _drag(self, event):
-        w = self.winfo_width()
-        x0, x1 = self.pad, w - self.pad
-        if x1 <= x0:
-            return
-        frac = max(0.0, min(1.0, (event.x - x0) / float(x1 - x0)))
-        value = self.minimum + frac * (self.maximum - self.minimum)
-        self.on_user_change(value)
-
-
 class NumberField(tk.Frame):
-    """Bordered numeric entry with unit suffix and invalid/focus states."""
+    """Bordered numeric entry with unit suffix, invalid/focus states and Up/Down stepping."""
 
-    def __init__(self, parent, variable, unit='', width=7, on_user_edit=None, step=1, minimum=0, maximum=100):
+    def __init__(self, parent, variable, unit='', width=7, step=1, minimum=0, maximum=100):
         super().__init__(parent, bg=THEME['input_bg'], highlightthickness=1,
                          highlightbackground=THEME['border'], highlightcolor=THEME['sel_line'])
         self.variable = variable
-        self.on_user_edit = on_user_edit
         self.step = step
         self.minimum = minimum
         self.maximum = maximum
         self.invalid = False
         self.entry = tk.Entry(self, textvariable=variable, width=width, justify='right', bd=0,
                               bg=THEME['input_bg'], fg=THEME['ink'], insertbackground=THEME['gold'],
-                              disabledbackground=THEME['input_bg'], font=font(parent, 'body_b'),
-                              relief='flat', highlightthickness=0)
+                              disabledbackground=THEME['input_bg'], disabledforeground=THEME['faint'],
+                              font=font(parent, 'body_b'), relief='flat', highlightthickness=0)
         self.entry.pack(side='left', padx=(px(8), px(2)), pady=px(5))
         self.unit_lbl = tk.Label(self, text=unit, bg=THEME['input_bg'], fg=THEME['quiet'], font=font(parent, 'sm'),
                                  width=6, anchor='w')
@@ -569,7 +425,6 @@ class NumberField(tk.Frame):
             self.unit_lbl.pack(side='left', padx=(0, px(8)))
         self.entry.bind('<FocusIn>', lambda _e: self._border())
         self.entry.bind('<FocusOut>', lambda _e: self._border())
-        self.entry.bind('<KeyRelease>', self._key)
         self.entry.bind('<Up>', lambda _e: self._nudge(1))
         self.entry.bind('<Down>', lambda _e: self._nudge(-1))
         for w in (self, self.unit_lbl):
@@ -588,11 +443,9 @@ class NumberField(tk.Frame):
         self.invalid = bool(invalid)
         self._border()
 
-    def _key(self, event):
-        if event.keysym in ('Up', 'Down', 'Tab', 'Shift_L', 'Shift_R', 'Control_L', 'Control_R', 'Left', 'Right'):
-            return
-        if self.on_user_edit:
-            self.on_user_edit()
+    def set_enabled(self, enabled):
+        self.entry.configure(state='normal' if enabled else 'disabled')
+        self.unit_lbl.configure(fg=THEME['quiet'] if enabled else THEME['faint'])
 
     def _nudge(self, direction):
         try:
@@ -601,8 +454,6 @@ class NumberField(tk.Frame):
             cur = float(self.minimum)
         nxt = max(self.minimum, min(self.maximum, cur + direction * self.step))
         self.variable.set(fmt_number(nxt))
-        if self.on_user_edit:
-            self.on_user_edit()
         return 'break'
 
 
@@ -611,57 +462,6 @@ def fmt_number(value):
     if value == int(value):
         return str(int(value))
     return f'{value:g}'
-
-
-class Tooltip:
-    """Small dark tooltip shown after a short hover delay."""
-
-    def __init__(self, widget, text, delay=450):
-        self.widget = widget
-        self.text = text
-        self.delay = delay
-        self.tip = None
-        self.after_id = None
-        widget.bind('<Enter>', self._schedule, add='+')
-        widget.bind('<Leave>', self.hide, add='+')
-        widget.bind('<ButtonPress>', self.hide, add='+')
-
-    def _schedule(self, _e=None):
-        self._cancel()
-        if self.text:
-            self.after_id = self.widget.after(self.delay, self.show)
-
-    def _cancel(self):
-        if self.after_id:
-            try:
-                self.widget.after_cancel(self.after_id)
-            except Exception:
-                pass
-            self.after_id = None
-
-    def show(self):
-        if self.tip or not self.text:
-            return
-        try:
-            x = self.widget.winfo_rootx() + px(8)
-            y = self.widget.winfo_rooty() + self.widget.winfo_height() + px(6)
-            self.tip = tw = tk.Toplevel(self.widget)
-            tw.wm_overrideredirect(True)
-            tw.configure(bg=THEME['frame'])
-            tk.Label(tw, text=self.text, justify='left', bg=THEME['side'], fg=THEME['ink'],
-                     padx=px(10), pady=px(7), wraplength=px(380), font=font(self.widget, 'sm')).pack(padx=1, pady=1)
-            tw.wm_geometry(f'+{x}+{y}')
-        except Exception:
-            self.tip = None
-
-    def hide(self, _e=None):
-        self._cancel()
-        if self.tip is not None:
-            try:
-                self.tip.destroy()
-            except Exception:
-                pass
-            self.tip = None
 
 
 class EllipsisLabel(tk.Label):
@@ -798,58 +598,6 @@ class ScrollArea(tk.Frame):
         self.canvas.yview_moveto(frac * (1 - view / total))
         self._draw_bar()
 
-    def scroll_top(self):
-        self.canvas.yview_moveto(0)
-        self._draw_bar()
-
-
-class SearchBox(tk.Frame):
-    """Search entry with magnifier glyph, placeholder and clear button."""
-
-    def __init__(self, parent, variable, placeholder='搜索', width=26):
-        super().__init__(parent, bg=THEME['input_bg'], highlightthickness=1,
-                         highlightbackground=THEME['border'], highlightcolor=THEME['sel_line'])
-        self.variable = variable
-        self.placeholder = placeholder
-        glyph, f = icon_text(parent, 'search')
-        if getattr(parent.winfo_toplevel(), '_kit_icon_family', None):
-            f = font(parent, 'icon_sm')
-        tk.Label(self, text=glyph, font=f, bg=THEME['input_bg'], fg=THEME['quiet']).pack(side='left', padx=(px(10), px(4)))
-        self.entry = tk.Entry(self, textvariable=variable, width=width, bd=0, relief='flat',
-                              bg=THEME['input_bg'], fg=THEME['ink'], insertbackground=THEME['gold'],
-                              font=font(parent, 'body'), highlightthickness=0)
-        self.entry.pack(side='left', fill='x', expand=True, pady=px(7))
-        self.hint = tk.Label(self, text=placeholder, bg=THEME['input_bg'], fg=THEME['faint'], font=font(parent, 'body'))
-        self.clear_btn = IconButton(self, 'close', command=lambda: (variable.set(''), self.entry.focus_set()),
-                                    size='icon_sm')
-        self.clear_btn.configure(bg=THEME['input_bg'])
-        self.hint.bind('<Button-1>', lambda _e: self.entry.focus_set())
-        self.entry.bind('<FocusIn>', lambda _e: self._sync())
-        self.entry.bind('<FocusOut>', lambda _e: self._sync())
-        self.entry.bind('<Escape>', lambda _e: variable.set(''))
-        self._trace = variable.trace_add('write', lambda *_: self._sync())
-        self._sync()
-
-    def _sync(self):
-        has_text = bool(self.variable.get())
-        if has_text:
-            self.hint.place_forget()
-            self.clear_btn.pack(side='right', padx=(0, px(6)))
-        else:
-            self.clear_btn.pack_forget()
-            self.hint.place(in_=self.entry, x=0, rely=0.5, anchor='w')
-
-    def focus(self):
-        self.entry.focus_set()
-        self.entry.select_range(0, 'end')
-
-    def destroy(self):
-        try:
-            self.variable.trace_remove('write', self._trace)
-        except Exception:
-            pass
-        super().destroy()
-
 
 # ---------------------------------------------------------------------------
 # Composite building blocks
@@ -861,43 +609,15 @@ def card(parent, padx=16, pady=14, bg=None, border=None):
 
 
 def label(parent, text='', style='body', fg=None, bg=None, **kw):
-    colours = {'h1': 'ink', 'h2': 'ink', 'em': 'ink', 'body': 'ink', 'body_b': 'ink',
-               'sm': 'quiet', 'sm_b': 'quiet', 'xs': 'quiet', 'mono': 'ink'}
+    colours = {'sm': 'quiet', 'sm_b': 'quiet', 'xs': 'quiet'}
     return tk.Label(parent, text=text, font=font(parent, style), bg=bg or bg_of(parent),
                     fg=fg or THEME[colours.get(style, 'ink')], **kw)
 
 
-def section_title(parent, text, right=None):
+def section_title(parent, text):
     row = tk.Frame(parent, bg=bg_of(parent))
     tk.Label(row, text=text, font=font(parent, 'sm_b'), bg=bg_of(parent), fg=THEME['quiet']).pack(side='left')
-    if right is not None:
-        right(row)
     return row
-
-
-def divider(parent, bg=None, pady=0):
-    line = tk.Frame(parent, bg=bg or THEME['divider'], height=1)
-    return line
-
-
-def set_bg(widget, colour, skip=()):
-    """Recursively recolour a widget subtree (skipping inputs and given widgets)."""
-    if widget in skip or getattr(widget, '_keep_bg', False):
-        return
-    try:
-        widget.configure(bg=colour)
-    except Exception:
-        pass
-    for child in widget.winfo_children():
-        set_bg(child, colour, skip)
-
-
-def is_descendant(widget, ancestor):
-    while widget is not None:
-        if widget is ancestor:
-            return True
-        widget = getattr(widget, 'master', None)
-    return False
 
 
 class Badge(tk.Label):
@@ -905,9 +625,6 @@ class Badge(tk.Label):
     KINDS = {
         'neutral': ('raise', 'muted'),
         'gold': ('gold_dim', 'gold_ink'),
-        'ok': ('ok_bg', 'green'),
-        'danger': ('danger_bg', 'red'),
-        'info': ('info_bg', 'gold'),
     }
 
     def __init__(self, parent, text='', kind='neutral', style='sm_b'):
@@ -945,7 +662,7 @@ STATUS_STYLE = {
 
 
 class StatusIcon(tk.Label):
-    """Round status medallion (ok / info / error)."""
+    """Round status medallion (ok / info / stale / error)."""
 
     def __init__(self, parent, d=52):
         super().__init__(parent, bd=0, padx=0, pady=0, compound='center', bg=bg_of(parent))
@@ -985,7 +702,6 @@ class StatusHero(tk.Frame):
         self.actions.pack(fill='x', pady=(px(18), 0), padx=(px(68), 0))
 
     def set_state(self, kind, title, desc):
-        colour, _tint, _icon = STATUS_STYLE.get(kind, STATUS_STYLE['info'])
         self.icon.set(kind)
         self.title.configure(text=title, fg=THEME['green'] if kind == 'ok' else THEME['red'] if kind == 'error' else THEME['ink'])
         self.desc.configure(text=desc)
@@ -1022,10 +738,16 @@ def steps_row(parent):
 
 
 class AddonGrid(tk.Frame):
-    """Two-column grid of optional module switches."""
+    """Two-column grid of optional module switches.
 
-    def __init__(self, parent, specs, variables, columns=2):
+    values: {key: (StringVar, spec)} for modules that take a number; spec has
+    label, unit, step, minimum, maximum and width. The field follows its switch.
+    """
+
+    def __init__(self, parent, specs, variables, columns=2, values=None):
         super().__init__(parent, bg=bg_of(parent))
+        self.fields = {}
+        values = values or {}
         for idx, (key, title, desc) in enumerate(specs):
             r, c = divmod(idx, columns)
             cell = tk.Frame(self, bg=bg_of(parent), padx=px(4), pady=px(8))
@@ -1040,22 +762,21 @@ class AddonGrid(tk.Frame):
                                 anchor='w', justify='left', wraplength=px(260))
             desc_lbl.pack(anchor='w', fill='x', pady=(px(2), 0))
             text.bind('<Configure>', lambda e, l=desc_lbl: l.configure(wraplength=max(px(120), e.width - px(4))))
+            if key in values:
+                var, spec = values[key]
+                row = tk.Frame(text, bg=bg_of(parent))
+                row.pack(anchor='w', pady=(px(6), 0))
+                tk.Label(row, text=spec.label, font=font(self, 'sm'), bg=bg_of(parent), fg=THEME['muted']).pack(
+                    side='left', padx=(0, px(8)))
+                field = NumberField(row, var, unit=spec.unit, width=spec.width, step=spec.step,
+                                    minimum=spec.minimum, maximum=spec.maximum)
+                field.pack(side='left')
+                self.fields[key] = field
+                switch = variables[key]
+                switch.trace_add('write', lambda *_, f=field, v=switch: f.set_enabled(bool(v.get())))
+                field.set_enabled(bool(switch.get()))
         for c in range(columns):
             self.columnconfigure(c, weight=1, uniform='addons')
-
-
-def empty_state(parent, title, subtitle, action_text=None, action=None, icon='info'):
-    box = tk.Frame(parent, bg=THEME['card'], highlightthickness=1, highlightbackground=THEME['border'],
-                   padx=px(24), pady=px(34))
-    glyph, f = icon_text(parent, icon)
-    if getattr(parent.winfo_toplevel(), '_kit_icon_family', None):
-        f = font(parent, 'icon_lg')
-    tk.Label(box, text=glyph, font=f, bg=THEME['card'], fg=THEME['faint']).pack()
-    tk.Label(box, text=title, font=font(parent, 'em'), bg=THEME['card'], fg=THEME['ink']).pack(pady=(px(10), px(4)))
-    tk.Label(box, text=subtitle, font=font(parent, 'sm'), bg=THEME['card'], fg=THEME['quiet']).pack()
-    if action_text and action:
-        Button(box, action_text, action, variant='secondary', size='sm').pack(pady=(px(16), 0))
-    return box
 
 
 def launch_game_or_dir(game_dir):

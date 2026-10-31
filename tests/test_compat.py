@@ -10,7 +10,7 @@ from unittest.mock import patch
 from tests import REFERENCE, SRC
 import database
 from database import decode, table_version
-from game_compat import MANIFEST, check, game_version, make_manifest, read_manifest, steam_build
+from game_compat import MANIFEST, addon_record, check, game_version, make_manifest, manifest_addons, read_manifest, steam_build
 from ingame_installer import detect_installed_mode, prepare_payload
 from pack_io import read_pack, write_pack
 import trainer_core
@@ -38,8 +38,8 @@ class FakeGame:
         (self.path / 'data/db.pack').write_bytes(
             write_pack({f'db\\{name}\\data__': data for name, data in tables.items()}, pack_type=1))
 
-    def pack(self, tracked, extra=None, version=trainer_core.VERSION):
-        files = dict(MARKER, **{MANIFEST: make_manifest(self.path, tracked, version)}, **(extra or {}))
+    def pack(self, tracked, extra=None, version=trainer_core.VERSION, addons=None):
+        files = dict(MARKER, **{MANIFEST: make_manifest(self.path, tracked, version, addons)}, **(extra or {}))
         target = self.path / 'data' / PACK_NAME
         target.write_bytes(write_pack(files))
         return target
@@ -100,25 +100,63 @@ class CompatibilityTests(unittest.TestCase):
         self.assertEqual(check(self.game.path, self.pack).state, 'unknown')
 
     def test_installer_reports_a_stale_pack_and_a_healthy_one(self):
-        self.assertEqual(detect_installed_mode(self.game.path)[3], 'ok')
+        self.assertEqual(detect_installed_mode(self.game.path).kind, 'ok')
         self.game.write(dict(self.TABLES, main_units_tables=table(8, b'a')))
-        title, desc, _, kind = detect_installed_mode(self.game.path)
-        self.assertEqual(kind, 'stale')
-        self.assertIn('重新适配', title)
-        self.assertIn('v7 → v8', desc)
+        status = detect_installed_mode(self.game.path)
+        self.assertEqual(status.kind, 'stale')
+        self.assertIn('重新适配', status.title)
+        self.assertIn('v7 → v8', status.desc)
 
     def test_installer_offers_an_update_when_the_installed_pack_is_older(self):
-        self.game.pack(self.TRACKED, version='1.0.0')
-        title, desc, _, kind = detect_installed_mode(self.game.path)
-        self.assertEqual(kind, 'info')
-        self.assertIn(trainer_core.VERSION, title)
-        self.assertIn('1.0.0', desc)
+        self.game.pack(self.TRACKED, version='1.0.0', addons=addon_record(['ai']))
+        status = detect_installed_mode(self.game.path)
+        self.assertEqual(status.kind, 'info')
+        self.assertIn(trainer_core.VERSION, status.title)
+        self.assertIn('1.0.0', status.desc)
+        self.assertEqual(status.addons['enabled'], ['ai'])  # an update keeps the modules
 
     def test_installer_flags_packs_from_before_manifests(self):
         self.pack.write_bytes(write_pack(MARKER))
-        title, _, _, kind = detect_installed_mode(self.game.path)
-        self.assertEqual(kind, 'stale')
-        self.assertIn('需要更新', title)
+        status = detect_installed_mode(self.game.path)
+        self.assertEqual(status.kind, 'stale')
+        self.assertIn('需要更新', status.title)
+        self.assertIsNone(status.addons)
+
+    def test_manifest_records_optional_modules_and_their_parameters(self):
+        record = addon_record(['shop', 'cap', 'bogus'], {'cap_value': 75, 'agent_ai_value': 40})
+        self.assertEqual(record, {'enabled': ['cap', 'shop'], 'values': {'cap_value': 75.0}})
+        self.game.pack(self.TRACKED, addons=record)
+        self.assertEqual(manifest_addons(read_manifest(self.pack)), record)
+        self.assertEqual(manifest_addons({'addons': {'enabled': ['ai'], 'values': {'cap_value': 'x'}}}),
+                         {'enabled': ['ai'], 'values': {}})
+        self.game.pack(self.TRACKED)
+        self.assertIsNone(manifest_addons(read_manifest(self.pack)))
+        self.assertIsNone(manifest_addons({'addons': 'ai'}))
+
+    def test_installer_names_the_installed_modules(self):
+        self.game.pack(self.TRACKED, addons=addon_record(['shop', 'cap'], {'cap_value': 50}))
+        status = detect_installed_mode(self.game.path)
+        self.assertEqual((status.kind, status.title), ('ok', '已安装 · 含 2 个附加模块'))
+        self.assertIn('全局战斗回血上限（50 倍）', status.desc)
+        self.assertIn('基斯里夫祈祷神器奖励', status.desc)
+        self.assertEqual(status.addons, {'enabled': ['cap', 'shop'], 'values': {'cap_value': 50.0}})
+        self.game.pack(self.TRACKED, addons=addon_record([]))
+        status = detect_installed_mode(self.game.path)
+        self.assertEqual((status.kind, status.title), ('ok', '已安装 · 纯净面板'))
+        self.assertEqual(status.addons, {'enabled': [], 'values': {}})
+
+    def test_installer_keeps_working_with_packs_that_predate_module_records(self):
+        status = detect_installed_mode(self.game.path)
+        self.assertEqual((status.kind, status.title), ('ok', '已安装游戏内面板'))
+        self.assertIsNone(status.addons)
+        self.assertIn('没有记录附加模块', status.desc)
+
+    def test_stale_pack_still_reports_its_modules(self):
+        self.game.pack(self.TRACKED, addons=addon_record(['agent_ai'], {'agent_ai_value': 80}))
+        self.game.write(dict(self.TABLES, main_units_tables=table(8, b'a')))
+        status = detect_installed_mode(self.game.path)
+        self.assertEqual(status.kind, 'stale')
+        self.assertEqual(status.addons, {'enabled': ['agent_ai'], 'values': {'agent_ai_value': 80.0}})
 
     def test_steam_build_is_optional(self):
         self.assertEqual(steam_build(self.game.path), '123')
@@ -219,6 +257,7 @@ class GameDataTests(unittest.TestCase):
             script = read_pack(path, lambda n: n.endswith('wh3pt_panel.lua'))
         self.assertEqual(status.state, 'current')
         self.assertEqual(status.manifest['trainer_version'], trainer_core.VERSION)
+        self.assertEqual(manifest_addons(status.manifest), {'enabled': [], 'values': {}})
         self.assertTrue((income | strategic) <= set(status.manifest['tables']))
         head = next(iter(script.values())).decode('utf-8').split('\n', 1)[0]
         self.assertIn('["trainer"]="' + trainer_core.VERSION + '"', head)

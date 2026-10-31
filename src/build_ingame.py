@@ -11,7 +11,7 @@ import zlib
 from attributes import ATTRIBUTES, NEGATIVE, SCOPE_CORRECTIONS, templates, validate_value
 from trainer_core import GAME, Options, EFFECTS, OUTPUT, REFERENCE, VERSION, build, sha, atomic_write, PACK_NAME
 from database import encode, decode, table_version
-from game_compat import MANIFEST, game_version, make_manifest
+from game_compat import MANIFEST, addon_record, game_version, make_manifest
 from pack_io import read_pack, write_pack
 from shop_addon import SHOP_FILENAME
 from ballistic_addon import BALLISTIC_FILENAME
@@ -470,7 +470,7 @@ def ui_files(catalog, strategic=None, game=GAME):
 
 def build_ingame(game=GAME, addons=None, local_dir=None, workshop=None):
     local_dir = Path(local_dir) if local_dir else REFERENCE
-    files, catalog, warnings, enabled_addons = {}, [], [], []
+    files, catalog, warnings, enabled_addons, addon_values = {}, [], [], [], {}
     refs = templates(local_dir, warnings)
     for key, spec in ATTRIBUTES.items():
         label, effect, human, category, maximum, default, unit = spec
@@ -631,9 +631,11 @@ def build_ingame(game=GAME, addons=None, local_dir=None, workshop=None):
                 building=bool(addons.get('building')),
                 ai=bool(addons.get('ai')),
                 cap=bool(addons.get('cap')),
-                cap_value=float(addons.get('cap_value', 50.0)),
+                cap_value=float(addons.get('cap_value', Options.cap_value)),
                 local_mods=local_mods,
             )
+            if addon_opts.cap:
+                addon_values['cap_value'] = addon_opts.cap_value
             addon_payload, addon_report = build(game, addon_opts, workshop=workshop, local_dir=local_dir)
             warnings.extend(addon_report['warnings'])
             for name, data in _unpack(addon_payload).items():
@@ -641,8 +643,9 @@ def build_ingame(game=GAME, addons=None, local_dir=None, workshop=None):
                     continue
                 files[name] = data
         if addons.get('agent_ai'):
-            val = float(addons.get('agent_ai_value', 100.0))
+            val = float(addons.get('agent_ai_value', ATTRIBUTES['agent_ai'][5]))
             validate_value('agent_ai', val)
+            addon_values['agent_ai_value'] = val
             if 'agent_ai' not in refs:
                 raise ValueError('缺少敌方间谍减益参考包')
             _, ai_rows = refs['agent_ai']
@@ -662,10 +665,11 @@ def build_ingame(game=GAME, addons=None, local_dir=None, workshop=None):
     files['wh3_personal_trainer_marker.txt'] = b'WH3-PERSONAL-TRAINER-v1'
     files['wh3pt_mode.txt'] = b'ingame-v2'
     shipped = {n.split('\\')[1] for n in files if n.startswith('db\\')}
-    files[MANIFEST] = make_manifest(game, shipped | STRATEGIC_TABLES | INCOME_TABLES, VERSION)
+    files[MANIFEST] = make_manifest(game, shipped | STRATEGIC_TABLES | INCOME_TABLES, VERSION,
+                                    addon_record(enabled_addons, addon_values))
     payload = write_pack(files)
     report = dict(
-        mode='ingame-v2', features=catalog, addons=enabled_addons, sha256=sha(payload),
+        mode='ingame-v2', features=catalog, addons=enabled_addons, addon_values=addon_values, sha256=sha(payload),
         strategic_counts={k: len(v) for k, v in strategic.items()},
         warnings=warnings, validation='Offline only; native UI and game effects require in-game verification',
     )

@@ -21,7 +21,7 @@ class KitTests(unittest.TestCase):
         finally:
             root.destroy()
 
-    def test_switch_button_slider_and_field(self):
+    def test_switch_button_and_field(self):
         root = tk.Tk(); root.withdraw()
         try:
             ui.setup(root)
@@ -35,10 +35,6 @@ class KitTests(unittest.TestCase):
             self.assertEqual(hits, [1])
             btn.set_text('启动游戏')
             self.assertEqual(btn.cget('text'), '启动游戏')
-            seen = []
-            slider = ui.Slider(root, 0, 100, seen.append)
-            slider.set_value(250); self.assertEqual(slider.value, 100)
-            slider.set_value('abc'); self.assertEqual(slider.value, 100)
             value = tk.StringVar(root, '10')
             field = ui.NumberField(root, value, unit='%', step=5, minimum=0, maximum=20)
             field._nudge(1); self.assertEqual(value.get(), '15')
@@ -49,108 +45,101 @@ class KitTests(unittest.TestCase):
             root.destroy()
 
 
-class ControlTests(unittest.TestCase):
-    def test_feature_row_bidirectional_values_and_invalid_text(self):
-        import app
-        root = tk.Tk(); root.withdraw()
-        try:
-            ui.setup(root)
-            enabled, value, changes = tk.BooleanVar(root, False), tk.StringVar(root, '33'), []
-            row = app.FeatureRow(root, '特保', '', enabled, lambda value_only=False: changes.append(value_only),
-                                 value=value, maximum=100, unit='效果值')
-            value.set('47.5')
-            self.assertEqual(row.slider.value, 47.5)
-            row._slider_user(72.4)
-            self.assertEqual(value.get(), '72')
-            self.assertTrue(enabled.get())
-            value.set('')
-            self.assertEqual(row.slider.value, 72)
-            value.set('101')
-            self.assertEqual(value.get(), '101')
-            self.assertIn('请输入', row.desc_lbl.full_text)
-            self.assertTrue(row.field.invalid)
-            value.set('66')
-            self.assertFalse(row.field.invalid)
-            self.assertEqual(row.slider.value, 66)
-            self.assertTrue(row.matches('特保')); self.assertFalse(row.matches('护甲'))
-            row.destroy()
-        finally:
-            root.destroy()
+class InstallerTests(unittest.TestCase):
+    """The installer window against a fake install state; nothing touches the game."""
 
-    def test_migration_rescan_persistence(self):
-        import app
+    def window(self, status, settings=None):
+        import ingame_installer as inst
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        path = Path(temp.name) / 'settings.json'
+        if settings is not None:
+            path.write_text(json.dumps(settings), encoding='utf-8')
+        for patcher in (patch.object(inst, 'SETTINGS', path), patch.object(inst, 'detect_installed_mode', return_value=status)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        win = inst.Installer(); win.withdraw()
+        self.addCleanup(win.destroy)
+        return inst, win, path
+
+    def test_switches_follow_the_installed_pack_and_the_button_tracks_changes(self):
+        import ingame_installer as inst
+        installed = inst.InstallStatus('ok', '已安装 · 含 1 个附加模块', '', {'enabled': ['cap'], 'values': {'cap_value': 50.0}})
+        inst, win, settings = self.window(installed, settings={'game': inst.GAME, 'addons': {'shop': True, 'cap': False}})
+        # The pack in the game directory wins over the remembered selection.
+        self.assertTrue(win.addons['cap'].get()); self.assertFalse(win.addons['shop'].get())
+        self.assertEqual(win.values['cap'].get(), '50')
+        self.assertEqual(win.addon_summary.text_value, '已选 1 / 6')
+        self.assertEqual(win.primary_cta_btn.text_value, '启动游戏')
+        self.assertEqual(win.reinstall_cta_btn.text_value, '重新安装 / 更新')
+        self.assertFalse(win._addons_open)
+        win.toggle_addons(); self.assertTrue(win._addons_open)
+        win.addons['shop'].set(True)
+        self.assertEqual(win.primary_cta_btn.text_value, '重新安装以应用更改')
+        self.assertEqual(win.reinstall_cta_btn.text_value, '启动游戏')
+        self.assertEqual(win.addon_summary.text_value, '已选 2 / 6 · 未应用')
+        win.addons['shop'].set(False)
+        self.assertEqual(win.primary_cta_btn.text_value, '启动游戏')
+        win.values['cap'].set('100')
+        self.assertEqual(win.primary_cta_btn.text_value, '重新安装以应用更改')
+        win.values['cap'].set('abc')
+        self.assertTrue(win.addon_grid.fields['cap'].invalid)
+        with patch.object(inst.messagebox, 'showerror') as error, patch.object(inst, 'install') as install:
+            win.deploy()
+            error.assert_called_once(); install.assert_not_called()
+        self.assertIn('0～100000000', error.call_args.args[1])
+        win.values['cap'].set('100')
+        self.assertFalse(win.addon_grid.fields['cap'].invalid)
+        with patch.object(inst, 'prepare_payload', return_value=b'payload') as prepare, \
+                patch.object(inst, 'install', return_value=Path(settings.parent) / 'x.pack'):
+            win.deploy()
+        self.assertEqual(prepare.call_args.args[1], {'cap': True, 'cap_value': 100.0})
+        saved = json.loads(settings.read_text(encoding='utf-8'))
+        self.assertEqual(set(saved), {'game', 'addons', 'addon_values'})
+        self.assertEqual(saved['addons'], {'building': False, 'ai': False, 'cap': True, 'agent_ai': False, 'shop': False, 'ballistic': False})
+        self.assertEqual(saved['addon_values'], {'cap_value': '100', 'agent_ai_value': '100'})
+        self.assertEqual(win.logs[-1][:4], '已安装：')
+        win._draw_badge(inst.InstallStatus('error', '游戏目录无效', 'x'))
+        self.assertEqual(win.primary_cta_btn.text_value, '一键安装')
+        self.assertTrue(win._path_open)
+
+    def test_remembered_selection_applies_when_nothing_is_installed(self):
+        import ingame_installer as inst
+        desktop = {'game': inst.GAME, 'ingame_addons': {'building': True, 'agent_ai': True, 'bogus': True},
+                   'options': {'cap_value': 60}, 'attribute_controls': {'agent_ai': {'enabled': True, 'value': '80'}}}
         with tempfile.TemporaryDirectory() as temp:
-            state = Path(temp) / 'settings.json'
-            state.write_text(json.dumps({'game': app.GAME, 'local': str(app.REFERENCE), 'options': {'local_mods': ['@玩家部队66特保.pack', '@玩家战役部队维护费全免.pack', '@玩家战役1回合建筑.pack']}}), encoding='utf-8')
-            with patch.object(app, 'STATE', state):
-                window = app.App(); window.withdraw()
-                try:
-                    self.assertEqual(window.collect_options().attributes['ward'], 66)
-                    self.assertEqual(window.collect_options().attributes['upkeep'], 100)
-                    self.assertNotIn('@玩家部队66特保.pack', window.local_options)
-                    self.assertTrue(window.local_options['@玩家战役1回合建筑.pack'].get())
-                    window.attribute_options['ward'][1].set('47.5')
-                    window.scan()
-                    self.assertEqual(window.collect_options().attributes['ward'], 47.5)
-                    window.save()
-                    record = json.loads(state.read_text(encoding='utf-8'))
-                    self.assertEqual(record['options']['attributes']['ward'], 47.5)
-                    self.assertNotIn('@玩家部队66特保.pack', record['options']['local_mods'])
-                    window.ingame_addons['building'].set(True)
-                    window.ingame_addons['agent_ai'].set(True)
-                    self.assertIn('2', window.addon_badge.text_value)
-                    with patch.object(app, 'HOME', Path(temp)):
-                        payload = window.generate_ingame()
-                        self.assertIsNotNone(payload)
-                        self.assertTrue((Path(temp) / 'output/ingame' / app.PACK_NAME).is_file())
-                    # Navigation, counts, empty states, global search and the active list.
-                    total = window.update_count()
-                    self.assertGreaterEqual(total, 3)
-                    self.assertEqual(window.nav['active'].badge.text_value, str(total))
-                    window.show_group('battle')
-                    self.assertEqual(window.current_page, 'catalog')
-                    self.assertTrue(window.nav['battle'].selected)
-                    self.assertGreater(window.filter(), 10)
-                    window.show_group('favs')
-                    self.assertIsNotNone(window._empty_state)
-                    fav_row = next(r for r in window.all_rows() if r.item_id == 'attr_ward')
-                    fav_row._toggle_fav()
-                    self.assertEqual(window.filter(), 1)
-                    self.assertIsNone(window._empty_state)
-                    shown = {group: (window.show_group(group), window.filter())[1] for group in ('domestic', 'army', 'battle', 'mods')}
-                    self.assertTrue(all(shown.values()), shown)
-                    self.assertEqual(sum(shown.values()), len(window.all_rows()))
-                    window.show_group('domestic')
-                    window.search.set('不存在的功能关键词')
-                    self.assertIsNotNone(window._empty_state)
-                    window.search.set('伤害')
-                    self.assertEqual(window.filter(), 2)  # global search across categories
-                    window.search.set('')
-                    window.show_page('active')
-                    self.assertTrue(window.build_bar.winfo_manager())
-                    self.assertEqual(len(window._collect_active_items()), total)
-                    window.show_page('settings')
-                    self.assertFalse(window.build_bar.winfo_manager())
-                    window.clear()
-                    self.assertEqual(window.update_count(), 0)
-                finally:
-                    window.destroy()
+            self.assertEqual(inst.load_settings(Path(temp) / 'missing.json'),
+                             {'game': None, 'addons': {k: False for k in inst.ADDON_KEYS}, 'addon_values': {}})
+            (Path(temp) / 'old.json').write_text(json.dumps(desktop), encoding='utf-8')
+            self.assertEqual(inst.load_settings(Path(temp) / 'old.json')['addon_values'], {'cap_value': '60', 'agent_ai_value': '80'})
+            (Path(temp) / 'bad.json').write_text('[1', encoding='utf-8')
+            self.assertEqual(inst.load_settings(Path(temp) / 'bad.json')['game'], None)
+        inst, win, settings = self.window(inst.InstallStatus('info', '尚未安装', ''), settings=desktop)
+        self.assertTrue(win.addons['building'].get()); self.assertTrue(win.addons['agent_ai'].get())
+        self.assertFalse(win.addons['cap'].get())
+        self.assertEqual((win.values['cap'].get(), win.values['agent_ai'].get()), ('60', '80'))
+        self.assertEqual(win.addon_summary.text_value, '已选 2 / 6')
+        self.assertEqual(win.primary_cta_btn.text_value, '一键安装')
+        self.assertEqual(win.selected_addons(), {'building': True, 'agent_ai': True, 'agent_ai_value': 80.0})
+        with patch.object(win, 'destroy') as destroy:
+            win.close()
+            destroy.assert_called_once()
+        self.assertEqual(json.loads(settings.read_text(encoding='utf-8'))['addons']['building'], True)
 
-    def test_installer_window_builds_and_toggles(self):
-        import ingame_installer
-        win = ingame_installer.Installer(); win.withdraw()
-        try:
-            self.assertFalse(win._addons_open)
-            win.toggle_addons(); self.assertTrue(win._addons_open)
-            win.addons['shop'].set(True)
-            self.assertIn('1', win.addon_summary.text_value)
-            win._draw_badge('ok', '已安装游戏内面板', '')
-            self.assertEqual(win.primary_cta_btn.text_value, '启动游戏')
-            win._draw_badge('error', '游戏目录无效', 'x')
-            self.assertEqual(win.primary_cta_btn.text_value, '一键安装')
-            self.assertTrue(win._path_open)
-        finally:
-            win.destroy()
+    def test_addon_number_fields_follow_their_switches(self):
+        import ingame_installer as inst
+        inst, win, _ = self.window(inst.InstallStatus('info', '尚未安装', ''))
+        field = win.addon_grid.fields['agent_ai']
+        self.assertEqual(field.entry.cget('state'), 'disabled')
+        win.addons['agent_ai'].set(True)
+        self.assertEqual(field.entry.cget('state'), 'normal')
+        field._nudge(1)
+        self.assertEqual(win.values['agent_ai'].get(), '100')  # capped at the attribute maximum
+        field._nudge(-1)
+        self.assertEqual(win.values['agent_ai'].get(), '95')
+        with self.assertRaisesRegex(ValueError, '0～100'):
+            inst.parse_value('agent_ai', '101')
+        self.assertEqual(inst.parse_value('cap', ' 12.5 '), 12.5)
 
 
 if __name__ == '__main__':

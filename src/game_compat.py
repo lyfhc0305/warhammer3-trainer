@@ -12,6 +12,9 @@ import re
 from pack_io import db_header, read_pack
 
 MANIFEST = 'wh3pt_build.json'
+# Optional modules an in-game pack can carry, and the parameter each one takes.
+ADDON_KEYS = ('building', 'ai', 'cap', 'agent_ai', 'shop', 'ballistic')
+ADDON_VALUES = {'cap': 'cap_value', 'agent_ai': 'agent_ai_value'}
 
 
 def steam_build(game):
@@ -59,15 +62,43 @@ def database_digest(game):
     return hashlib.sha256((Path(game) / 'data/db.pack').read_bytes()).hexdigest()
 
 
-def make_manifest(game, tables, version):
-    """What this Pack was generated from, stored inside the Pack."""
-    return json.dumps({
+def addon_record(enabled, values=None):
+    """Manifest entry for a pack's optional modules: which are built in, with their parameters."""
+    enabled = [key for key in ADDON_KEYS if key in enabled]
+    values = values or {}
+    return {
+        'enabled': enabled,
+        'values': {ADDON_VALUES[k]: float(values[ADDON_VALUES[k]])
+                   for k in enabled if k in ADDON_VALUES and ADDON_VALUES[k] in values},
+    }
+
+
+def manifest_addons(manifest):
+    """The modules a manifest records, in addon_record's shape; None for a pack from before they were recorded."""
+    record = (manifest or {}).get('addons')
+    if not isinstance(record, dict) or not isinstance(record.get('enabled'), list):
+        return None
+    values = record.get('values') if isinstance(record.get('values'), dict) else {}
+    return addon_record(record['enabled'], {k: v for k, v in values.items()
+                                            if isinstance(v, (int, float)) and not isinstance(v, bool)})
+
+
+def make_manifest(game, tables, version, addons=None):
+    """What this Pack was generated from, stored inside the Pack.
+
+    addons: addon_record() of the modules built in; None for a pack that does
+    not track them (the record is optional so older packs still read).
+    """
+    manifest = {
         'trainer_version': version,
         'game_version': game_version(game),
         'steam_build': steam_build(game),
         'database_sha256': database_digest(game),
         'tables': table_fingerprints(game, tables),
-    }, ensure_ascii=False, indent=2, sort_keys=True).encode('utf-8')
+    }
+    if addons is not None:
+        manifest['addons'] = addons
+    return json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True).encode('utf-8')
 
 
 def read_manifest(pack):

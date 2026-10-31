@@ -9,7 +9,7 @@ from build_ingame import build_ingame
 from database import decode, encode
 from pack_io import read_pack
 from shop_addon import ITEMS, SHOP_FILENAME, SHOP_SCRIPT, TABLE_FIELDS, REMOVED_MAGIC_EFFECT, decode_loc, safe_shop_entries
-from trainer_core import GAME, Options, build, LEGACY_RECOVERY_PRESETS
+from trainer_core import GAME, Options, build
 from ballistic_addon import BALLISTIC_FILENAME, PRIMARY_KEYS, NUMERIC_FIELDS, BOOLEAN_FIELDS, safe_ballistic_entries
 
 from tests import ROOT, SRC, REFERENCE
@@ -175,82 +175,6 @@ class StaticRecoveryTests(unittest.TestCase):
         self.assertTrue(phases[0]['resurrect'])
         self.assertEqual(phases[0]['replenish_ammo'], 0)
 
-    def test_legacy_preset_labels_match_actual_pack_parameters(self):
-        import app
-        self.assertEqual(len(app.RECOVERY_PRESETS), 3)
-        for filename, (label, heal, ammo) in app.RECOVERY_PRESETS.items():
-            with self.subTest(filename=filename):
-                path = REFERENCE / filename
-                entries = read_pack(path)
-                phases = [r for n, b in entries.items() if n.startswith('db\\special_ability_phases_tables\\')
-                          for r in decode('special_ability_phases_tables', b)[1] if r['id'] == 'SSS']
-                self.assertEqual(len(phases), 1)
-                self.assertAlmostEqual(phases[0]['heal_amount'] * 100, heal, places=5)
-                self.assertAlmostEqual(phases[0]['replenish_ammo'] * 100, ammo, places=5)
-                self.assertEqual(phases[0]['hp_change_frequency'], 3)
-                self.assertTrue(phases[0]['resurrect'])
-                scaling = [r for n, b in entries.items() if n.startswith('db\\_kv_unit_ability_scaling_rules_tables\\')
-                           for r in decode('_kv_unit_ability_scaling_rules_tables', b)[1]]
-                self.assertEqual(next(r['value'] for r in scaling if r['key'] == 'healing_percentage_cap'), 10)
-                self.assertEqual(app.local_mod_label(path), label)
-                self.assertNotIn('魔风', label)
-                self.assertNotIn('60回血', label)
-                hint = app.describe(path)
-                self.assertIn('每3秒', hint)
-                self.assertIn(f'{heal:g}%', hint)
-                self.assertIn(f'{ammo:g}%', hint)
-                self.assertIn('最大生命的10倍', hint)
-                self.assertNotIn('魔风', hint)
-                self.assertIn('按单位自身恢复', hint)
-
-    def test_known_legacy_presets_keep_healing_separate_from_repeating_ammo(self):
-        import app
-        self.assertEqual(set(app.RECOVERY_PRESETS), set(LEGACY_RECOVERY_PRESETS))
-        changes = {
-            'unit_special_abilities_tables': ('key', {
-                'effect_range': 0, 'num_effected_friendly_units': 0,
-                'update_targets_every_frame': False, 'additional_melee_cp': 0}),
-            'special_ability_phases_tables': ('id', {'ability_recharge_change': 0,'replenish_ammo':0}),
-            'special_ability_to_special_ability_phase_junctions_tables': ('special_ability', {'target_friends': False}),
-        }
-        rows_for = lambda files, table: [r for n, b in files.items() if n.startswith('db\\' + table + '\\') for r in decode(table, b)[1]]
-        for filename in LEGACY_RECOVERY_PRESETS:
-            with self.subTest(filename=filename):
-                path = REFERENCE / filename
-                original_bytes = path.read_bytes()
-                original = read_pack(path)
-                files = unpack(build(GAME, Options(local_mods=[filename]), local_dir=REFERENCE)[0])
-                for table, (identity, overrides) in changes.items():
-                    before = next(r for r in rows_for(original, table) if r[identity] == 'SSS')
-                    after = next(r for r in rows_for(files, table) if r[identity] == 'SSS')
-                    for field in before.keys() & after.keys():
-                        if field in overrides:
-                            self.assertEqual(after[field], overrides[field])
-                            self.assertNotEqual(before[field], after[field])
-                        else:
-                            self.assertEqual(after[field], before[field], f'{filename}: unexpectedly changed {table}.{field}')
-                # Gameplay attributes, fatigue, faction buffs and cap survive;
-                # the ineffective magic UI override is removed from the output.
-                for table in ['special_ability_phase_stat_effects_tables',
-                              'campaign_difficulty_handicap_effects_tables',
-                              '_kv_unit_ability_scaling_rules_tables']:
-                    canonical = lambda rows: sorted(repr(sorted(r.items())) for r in rows)
-                    self.assertEqual(canonical(rows_for(files, table)), canonical(rows_for(original, table)))
-                self.assertFalse(rows_for(files, '_kv_winds_of_magic_params_tables'))
-                self.assertEqual(len(rows_for(files, 'special_ability_phase_stat_effects_tables')), 11)
-                pulse=next(r for r in rows_for(files,'special_ability_phases_tables') if r['id']=='wh3pt_legacy_ammo')
-                original_phase=next(r for r in rows_for(original,'special_ability_phases_tables') if r['id']=='SSS')
-                self.assertEqual(pulse['duration'],3)
-                self.assertEqual(pulse['replenish_ammo'],original_phase['replenish_ammo'])
-                self.assertEqual(pulse['heal_amount'],0)
-                self.assertFalse(pulse['resurrect'])
-                self.assertFalse(pulse['freeze_fatigue'])
-                pulse_ability=next(r for r in rows_for(files,'unit_special_abilities_tables') if r['key']=='wh3pt_legacy_ammo')
-                self.assertEqual((pulse_ability['active_time'],pulse_ability['recharge_time'],pulse_ability['num_uses']),(3,0,-1))
-                grants=rows_for(files,'effect_bonus_value_unit_ability_junctions_tables')
-                self.assertEqual({r['unit_ability'] for r in grants if r['effect']=='SSS_force'},{'SSS','wh3pt_legacy_ammo'})
-                self.assertEqual(path.read_bytes(), original_bytes)
-
     def test_static_ammo_cycles_without_healing_and_mixed_mode_keeps_original_phase(self):
         rows_for=lambda files,table:[r for n,b in files.items() if n.startswith('db\\'+table+'\\') for r in decode(table,b)[1]]
         for options in [Options(ammunition=True,ammo_percent=20),
@@ -279,25 +203,6 @@ class StaticRecoveryTests(unittest.TestCase):
                     self.assertEqual({r['unit_ability'] for r in grants if r['effect']=='blood_returning'},{'blood',pulse_key})
                     stats=rows_for(files,'special_ability_phase_stat_effects_tables')
                     self.assertTrue(all(r['phase']=='blood' for r in stats))
-
-    def test_unrecognized_sss_reference_keeps_original_scope_and_side_effect_fields(self):
-        source = REFERENCE / next(iter(LEGACY_RECOVERY_PRESETS))
-        with tempfile.TemporaryDirectory() as folder:
-            reference = Path(folder) / 'custom-sss-reference.pack'
-            reference.write_bytes(source.read_bytes())
-            original = read_pack(reference)
-            files = unpack(build(GAME, Options(local_mods=[reference.name]), local_dir=folder)[0])
-        rows_for = lambda entries, table: [r for n, b in entries.items() if n.startswith('db\\' + table + '\\') for r in decode(table, b)[1]]
-        for table, identity, fields in [
-            ('unit_special_abilities_tables', 'key', ['effect_range', 'num_effected_friendly_units', 'update_targets_every_frame', 'additional_melee_cp']),
-            ('special_ability_phases_tables', 'id', ['ability_recharge_change']),
-            ('special_ability_to_special_ability_phase_junctions_tables', 'special_ability', ['target_friends']),
-        ]:
-            before = next(r for r in rows_for(original, table) if r[identity] == 'SSS')
-            after = next(r for r in rows_for(files, table) if r[identity] == 'SSS')
-            self.assertEqual({f: after[f] for f in fields}, {f: before[f] for f in fields})
-        self.assertEqual(rows_for(files, '_kv_winds_of_magic_params_tables'),
-                         rows_for(original, '_kv_winds_of_magic_params_tables'))
 
 
 class BallisticMigrationTests(unittest.TestCase):
