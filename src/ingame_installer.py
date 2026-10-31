@@ -83,6 +83,9 @@ def detect_installed_mode(game_dir):
             return title, status.describe() + '请重新适配并安装；暂时无法适配时先卸载，保证游戏能启动。', THEME['gold'], 'stale'
         entries = read_pack(target, lambda n: n == 'wh3pt_mode.txt')
         if entries.get('wh3pt_mode.txt') == b'ingame-v2':
+            installed = status.manifest.get('trainer_version')
+            if installed != VERSION:
+                return f'可更新到 {VERSION}', f'当前安装的是 {installed}。点击「一键安装」更新。', THEME['gold'], 'info'
             return '已安装游戏内面板', '一切就绪：进入单人战役后按 F9，或点击顶栏「◆ 修改器」呼出面板。', THEME['green'], 'ok'
         return '已安装静态配置包', '当前安装的是战前静态配置包；重新安装即可切换为游戏内实时面板。', THEME['gold'], 'info'
     except Exception as exc:

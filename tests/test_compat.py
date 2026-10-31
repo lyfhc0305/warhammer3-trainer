@@ -38,8 +38,8 @@ class FakeGame:
         (self.path / 'data/db.pack').write_bytes(
             write_pack({f'db\\{name}\\data__': data for name, data in tables.items()}, pack_type=1))
 
-    def pack(self, tracked, extra=None):
-        files = dict(MARKER, **{MANIFEST: make_manifest(self.path, tracked, '9.9.9')}, **(extra or {}))
+    def pack(self, tracked, extra=None, version=trainer_core.VERSION):
+        files = dict(MARKER, **{MANIFEST: make_manifest(self.path, tracked, version)}, **(extra or {}))
         target = self.path / 'data' / PACK_NAME
         target.write_bytes(write_pack(files))
         return target
@@ -64,7 +64,7 @@ class CompatibilityTests(unittest.TestCase):
         self.assertEqual(status.state, 'current')
         self.assertTrue(status.usable)
         self.assertEqual(status.manifest['steam_build'], '123')
-        self.assertEqual(status.manifest['trainer_version'], '9.9.9')
+        self.assertEqual(status.manifest['trainer_version'], trainer_core.VERSION)
 
     def test_patch_that_leaves_our_tables_alone_stays_usable(self):
         status = self.changed(other_tables=table(1, b'patched'))
@@ -106,6 +106,13 @@ class CompatibilityTests(unittest.TestCase):
         self.assertEqual(kind, 'stale')
         self.assertIn('重新适配', title)
         self.assertIn('v7 → v8', desc)
+
+    def test_installer_offers_an_update_when_the_installed_pack_is_older(self):
+        self.game.pack(self.TRACKED, version='1.0.0')
+        title, desc, _, kind = detect_installed_mode(self.game.path)
+        self.assertEqual(kind, 'info')
+        self.assertIn(trainer_core.VERSION, title)
+        self.assertIn('1.0.0', desc)
 
     def test_installer_flags_packs_from_before_manifests(self):
         self.pack.write_bytes(write_pack(MARKER))

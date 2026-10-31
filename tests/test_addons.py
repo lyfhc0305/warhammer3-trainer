@@ -395,11 +395,12 @@ class PanelStringCompatibilityTests(unittest.TestCase):
                 g.first_tick()
                 # One ordinary localized action and malformed short/prefix-only
                 # events exercise routing without invoking native UTF-8 slicing.
-                lua.execute("core:trigger_event('ComponentLClickUp',{string='x'}); core:trigger_event('ComponentLClickUp',{string='wh3pt_'}); core:trigger_event('ComponentLClickUp',{string='wh3pt_tab_部队'})")
-                self.assertEqual(g.widgets['wh3pt_tab_部队'].state, 'selected')
+                lua.execute("core:trigger_event('ComponentLClickUp',{string='x'}); core:trigger_event('ComponentLClickUp',{string='wh3pt_'}); core:trigger_event('ComponentLClickUp',{string='wh3pt_tab_战斗'})")
+                self.assertEqual(g.widgets['wh3pt_tab_战斗'].state, 'selected')
                 api.click('tab_全部')
                 def rows():
-                    return [w.id for w in g.widgets.values() if w.id.startswith('wh3pt_row_') and not w.dead]
+                    return [w.id for w in g.widgets.values() if w.id.startswith('wh3pt_row_') and not w.dead
+                            and not w.id.startswith('wh3pt_row_section_')]
                 g.widgets['wh3pt_search'].text = '['
                 api.click('search_go')
                 self.assertEqual(rows(), [])

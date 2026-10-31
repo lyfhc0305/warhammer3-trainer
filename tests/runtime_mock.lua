@@ -80,14 +80,26 @@ local function widget(id,parent,template)
         return created
     end
     function w:Id() return self.id end
-    function w:ChildCount() return #self.children end
+    -- A destroyed child is gone from its parent, as in the engine.
+    function w:ChildCount()
+        local count=0
+        for _,c in ipairs(self.children) do if not c.dead then count=count+1 end end
+        return count
+    end
     function w:Visible() return self.visible and not self.dead end
     function w:Find(name)
-        if type(name)=='number' then return self.children[name+1] end
-        for _,c in ipairs(self.children) do if c.id==name and not c.dead then return c end end
+        local index=-1
+        for _,c in ipairs(self.children) do
+            if not c.dead then
+                index=index+1
+                if index==name or c.id==name then return c end
+            end
+        end
     end
-    function w:Layout() end
+    function w:Layout() self.layouts=(self.layouts or 0)+1 end
     function w:SetMoveable(v) self.moveable=v end
+    function w:IsDragged() return self.dragged==true end
+    function w:SetProperty(name,value) self.properties=self.properties or {}; self.properties[name]=value end
     function w:Destroy() self.dead=true; for _,c in ipairs(self.children) do if not c.dead then c:Destroy() end end end
     function w:SetDockingPoint(n) assert(n==0) end
     function w:SetDockOffset(dx,dy) self.dock_dx=dx; self.dock_dy=dy end

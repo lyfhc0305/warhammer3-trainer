@@ -14,7 +14,7 @@ from ui_engine import FONT_SIZES, compensate, engine_rgb
 
 RESOLUTIONS = [(1280, 720), (1920, 1080), (2560, 1440)]
 TEXT_SCALES = [1.0, 1.5, 2.0]
-VIEWS = ['常用', '指令', '战役', '部队', '特殊', '收藏', '全部', 'sheet', 'preset', 'collapsed']
+VIEWS = ['总览', '内政', '军队', '战斗', '精英', '全部', 'sheet', 'collapsed']
 
 
 class InGameTests(unittest.TestCase):
@@ -158,14 +158,10 @@ class InGameTests(unittest.TestCase):
         self.assertFalse(self.g.original_card.visible)
         self.assertTrue(self.g.unlocked_card.visible)
         self.assertTrue(self.g.unrelated_card.visible)
-        badge=self.g.unlocked_card.Find(self.g.unlocked_card,'wh3pt_unlocked_badge')
-        self.assertEqual(badge.text,'已解锁')
-        self.assertTrue(badge.visible)
         self.api.native_filter()
-        self.assertEqual(self.g.unlocked_card.ChildCount(self.g.unlocked_card),1)
+        self.assertEqual(self.g.unlocked_card.ChildCount(self.g.unlocked_card),0)  # nothing written on the card
         self.api.native_toggle(False);self.native_flush()
         self.assertTrue(self.g.original_card.visible)
-        self.assertFalse(badge.visible)
 
     def test_native_dedup_uses_record_context_outside_scroll_clip(self):
         self.strategic_fixture()
@@ -187,9 +183,144 @@ class InGameTests(unittest.TestCase):
         self.api.native_toggle(True);self.native_flush()
         self.assertFalse(self.g.original_card.visible)
         self.assertTrue(self.g.unlocked_card.visible)
-        self.assertEqual(self.g.unlocked_card.Find(self.g.unlocked_card,'wh3pt_unlocked_badge').text,'已解锁')
         self.api.native_toggle(False);self.native_flush()
         self.assertTrue(self.g.original_card.visible)
+
+    def elite_window(self, keys):
+        """The native window: one horizontal list inside the pool list, cards by unit key."""
+        self.strategic_fixture()
+        self.g.test_keys=self.lua.table_from(keys)
+        self.lua.execute("""
+            elite_display=root:CreateComponent('mercenary_display','ui/wh3pt/label')
+            elite_pool=elite_display:CreateComponent('mercenary_recruitment_pool_list','ui/wh3pt/label')
+            elite_view=elite_pool:CreateComponent('listview','ui/wh3pt/label')
+            elite_view:MoveTo(400,300);elite_view:Resize(663,216)
+            elite_box=elite_view:CreateComponent('list_box','ui/wh3pt/label')
+            elite_cards={}
+            for i,key in ipairs(test_keys) do elite_cards[key]=elite_box:CreateComponent(key,'ui/wh3pt/label') end
+            function find_uicomponent(...) return elite_display end
+        """)
+
+    def elite_units(self):
+        """One native key per category, in the game's category order."""
+        chosen={}
+        for unit in self.api.strategic.units.values():
+            chosen.setdefault(unit.category,unit)
+        return sorted(chosen.values(),key=lambda unit:unit.category_order)
+
+    def test_elite_tabs_follow_game_categories_and_filter_the_cards(self):
+        units=self.elite_units()
+        self.elite_window([u.native_key for u in units]+['some_mod_regiment'])
+        self.lua.execute("""
+            function elite_cards.some_mod_regiment:GetContextObject(kind)
+                assert(kind=='CcoMainUnitRecord')
+                return {Call=function(_,field) assert(field=='Key');return 'some_mod_regiment' end}
+            end
+        """)
+        self.api.native_toggle(True);self.native_flush()
+        widgets=self.g.widgets
+        self.assertEqual(self.api.elite_tabs().selected(),'all')
+        self.assertEqual(widgets.wh3pt_elite_tab_all.text,'全部')
+        self.assertEqual(widgets.wh3pt_elite_tab_all.state,'selected')
+        self.assertEqual(widgets.wh3pt_elite_tab_infantry.text,'步兵')
+        self.assertEqual(widgets.wh3pt_elite_tab_infantry.state,'active')
+        self.assertIn('步兵',widgets.wh3pt_elite_tab_infantry.tooltip)
+        tabs=[w for w in widgets.values() if str(w.id).startswith('wh3pt_elite_tab_') and not w.dead]
+        self.assertEqual(sorted(t.id for t in tabs),sorted(['wh3pt_elite_tab_all','wh3pt_elite_tab_other']+['wh3pt_elite_tab_'+u.category for u in units]))
+        order=sorted(tabs,key=lambda t:t.x)
+        self.assertEqual([t.id for t in order[1:len(units)+1]],['wh3pt_elite_tab_'+u.category for u in units])
+        self.api.click('elite_tab_'+units[0].category)
+        cards=self.g.elite_cards
+        self.assertTrue(cards[units[0].native_key].visible)
+        for unit in units[1:]:
+            self.assertFalse(cards[unit.native_key].visible,unit.category)
+        self.assertFalse(cards['some_mod_regiment'].visible)
+        self.assertEqual(widgets['wh3pt_elite_tab_'+units[0].category].state,'selected')
+        layouts=self.g.elite_box.layouts
+        self.api.click('elite_tab_all')
+        self.assertTrue(all(c.visible for c in cards.values()))
+        self.assertGreater(self.g.elite_box.layouts,layouts)
+        self.api.click('elite_tab_other')
+        self.assertTrue(cards['some_mod_regiment'].visible)
+        self.assertFalse(cards[units[0].native_key].visible)
+
+    def test_elite_tabs_sit_between_title_and_list_and_fit_the_window(self):
+        units=self.elite_units()
+        self.elite_window([u.native_key for u in units])
+        self.api.native_toggle(True);self.native_flush()
+        view=self.g.elite_view
+        tabs=[w for w in self.g.widgets.values() if str(w.id).startswith('wh3pt_elite_tab_') and not w.dead]
+        self.assertEqual(len(tabs),len(units)+1)
+        for tab in tabs:
+            self.assertGreaterEqual(tab.x,view.x)
+            self.assertLessEqual(tab.x+tab.w,view.x+view.w)
+            self.assertLessEqual(tab.y+tab.h,view.y)
+            self.assertEqual(tab.priority,200)
+            self.assertLessEqual(tab.TextDimensions(tab)[0],tab.w,tab.text)
+
+    def test_elite_tabs_reapply_after_the_game_rebuilds_the_cards(self):
+        units=self.elite_units()
+        self.elite_window([u.native_key for u in units])
+        self.api.native_toggle(True);self.native_flush()
+        self.api.click('elite_tab_'+units[0].category)
+        self.g.test_rebuilt=units[1].native_key
+        self.lua.execute("""
+            elite_box:Destroy()
+            elite_box=elite_view:CreateComponent('list_box','ui/wh3pt/label')
+            for _,key in ipairs(test_keys) do elite_cards[key]=elite_box:CreateComponent(key,'ui/wh3pt/label') end
+        """)
+        self.lua.execute("core:trigger_event('UnitTrained', {})");self.native_flush()
+        self.assertFalse(self.g.elite_cards[units[1].native_key].visible)
+        self.assertTrue(self.g.elite_cards[units[0].native_key].visible)
+
+    def test_elite_tabs_leave_cards_the_game_hid_and_drop_an_emptied_tab(self):
+        units=self.elite_units()
+        self.elite_window([u.native_key for u in units])
+        cards=self.g.elite_cards
+        hidden=cards[units[1].native_key]
+        hidden.SetVisible(hidden,False)
+        self.api.native_toggle(True);self.native_flush()
+        self.assertIsNone(self.g.widgets['wh3pt_elite_tab_'+units[1].category])
+        self.api.click('elite_tab_'+units[0].category)
+        self.api.click('elite_tab_all')
+        self.assertFalse(hidden.visible)
+        self.api.click('elite_tab_'+units[0].category)
+        gone=cards[units[0].native_key]
+        gone.SetVisible(gone,False)
+        self.api.native_filter()
+        self.assertEqual(self.api.elite_tabs().selected(),'all')
+        self.assertTrue(cards[units[2].native_key].visible)
+
+    def test_elite_tabs_do_not_undo_duplicate_hiding(self):
+        self.strategic_fixture()
+        unit=next(d for d in self.api.strategic.units.values() if self.api.regiment_belongs(d,self.g.cm.get_faction(self.g.cm,'player')))
+        other=next(d for d in self.api.strategic.units.values() if d.category!=unit.category)
+        self.elite_window([unit.id,unit.native_key,other.native_key])
+        self.api.native_toggle(True);self.native_flush()
+        cards=self.g.elite_cards
+        self.assertFalse(cards[unit.id].visible)
+        self.api.click('elite_tab_'+other.category)
+        self.assertFalse(cards[unit.native_key].visible)
+        self.api.click('elite_tab_all')
+        self.assertTrue(cards[unit.native_key].visible)
+        self.assertFalse(cards[unit.id].visible)
+
+    def test_elite_tabs_stay_out_of_windows_with_nothing_to_sort(self):
+        units=self.elite_units()
+        self.elite_window([units[0].native_key,'raise_dead_a','raise_dead_b'])
+        self.api.native_toggle(True);self.native_flush()
+        self.assertIsNone(self.g.widgets.wh3pt_elite_tabs)
+        self.assertTrue(all(c.visible for c in self.g.elite_cards.values()))
+
+    def test_elite_tabs_removed_and_cards_restored_when_unlock_is_turned_off(self):
+        units=self.elite_units()
+        self.elite_window([u.native_key for u in units])
+        self.api.native_toggle(True);self.native_flush()
+        self.api.click('elite_tab_'+units[0].category)
+        self.api.native_toggle(False);self.native_flush()
+        self.assertTrue(all(c.visible for c in self.g.elite_cards.values()))
+        self.assertTrue(self.g.widgets.wh3pt_elite_tabs.dead)
+        self.assertEqual(self.api.elite_tabs().selected(),'all')
 
     def test_cross_faction_sisters_addition_does_not_read_invalidated_pool_objects(self):
         self.strategic_fixture()
@@ -335,7 +466,7 @@ class InGameTests(unittest.TestCase):
         for width,height in RESOLUTIONS:
             for scale in TEXT_SCALES:
                 self.g.screen_width,self.g.screen_height,self.g.engine_text_scale=width,height,scale
-                self.g.first_tick();self.api.click('open');self.api.click('tab_常用')
+                self.g.first_tick();self.api.click('open');self.api.click('tab_总览')
                 panel=self.g.widgets['wh3pt_panel'];gold=self.g.widgets['wh3pt_gold_val']
                 resource=self.g.widgets['wh3pt_home_resource_card']
                 self.assertGreaterEqual(resource.y,gold.y+gold.h)
@@ -364,7 +495,7 @@ class InGameTests(unittest.TestCase):
 
     def test_strategic_pages_stay_bounded_and_filter_owned_resources(self):
         self.strategic_fixture()
-        self.api.click('open'); self.api.click('tab_常用')
+        self.api.click('open'); self.api.click('tab_总览')
         self.assertIn('虔信',self.g.widgets['wh3pt_home_resource_name'].text)
         self.assertIsNone(self.g.widgets['wh3pt_tab_资源'])
         self.assertGreater(self.g.widgets['wh3pt_home_resource_card'].y,self.g.widgets['wh3pt_gold_val'].y)
@@ -481,7 +612,7 @@ class InGameTests(unittest.TestCase):
         self.assertTrue(icon.image_path.startswith('ui/units/'))
         self.assertIn('基础属性',icon.tooltip)
         self.assertIn('近攻',icon.tooltip)
-        self.api.click('tab_常用')
+        self.api.click('tab_总览')
         labels=[w.text for w in self.live() if w.id=='wh3pt_home_resource_name']
         self.assertIn('亡灵术能量',labels)
         self.assertFalse(any('soft_cap' in x or 'confidence' in x for x in labels))
@@ -534,7 +665,7 @@ class InGameTests(unittest.TestCase):
         self.assertEqual(resource.value(),5)
         self.api.set_resource(index,'30');self.g.flush()
         self.assertEqual(resource.value(),30)
-        self.api.click('open');self.api.click('tab_常用')
+        self.api.click('open');self.api.click('tab_总览')
         self.assertEqual(self.g.widgets['wh3pt_home_resource_name'].text,'可强化符印')
         self.assertIn('保留已强化',self.g.widgets['wh3pt_home_resource_icon'].tooltip)
         self.assertEqual(len(self.g.logs),0)
@@ -564,7 +695,7 @@ class InGameTests(unittest.TestCase):
     def test_strategic_switch_clears_stale_search(self):
         self.strategic_fixture();self.api.click('open');self.api.click('tab_精英')
         self.g.widgets['wh3pt_search'].SetStateText(self.g.widgets['wh3pt_search'],'nonexistent')
-        self.api.click('search_go');self.api.click('tab_常用');self.api.click('tab_精英')
+        self.api.click('search_go');self.api.click('tab_总览');self.api.click('tab_精英')
         self.assertEqual(self.g.widgets['wh3pt_search'].text,'')
         self.assertNotIn('0 项',self.g.widgets['wh3pt_strategy_pages'].text)
 
@@ -619,7 +750,7 @@ class InGameTests(unittest.TestCase):
         self.api.click('tab_精英')
         self.api.native_toggle(True)  # queued Kislev work must never target Dwarfs
         self.g.active_name='wh_main_dwf_dwarfs'
-        self.api.click('tab_常用'); self.api.click('tab_常用')
+        self.api.click('tab_总览'); self.api.click('tab_总览')
         self.native_flush()
         self.assertEqual(len(list(self.g.switch_pools['wh_main_dwf_dwarfs'].keys())),0)
         self.assertNotEqual(self.g.widgets['wh3pt_home_resource_name'].text,'虔信')
@@ -632,7 +763,7 @@ class InGameTests(unittest.TestCase):
         self.api.native_select(cross);self.native_flush()
         self.assertEqual(self.g.switch_pools['wh_main_dwf_dwarfs'][self.api.strategic.units[cross].native_key].count,20)
         self.g.active_name='player'
-        self.api.click('tab_常用');self.native_flush()
+        self.api.click('tab_总览');self.native_flush()
         self.assertEqual(self.g.widgets['wh3pt_home_resource_name'].text,'虔信')
         self.assertEqual(self.g.widgets['wh3pt_home_resource_value'].text,'777')
         self.assertIsNone(self.g.switch_pools['player'][self.api.strategic.units[cross].native_key])
@@ -648,7 +779,7 @@ class InGameTests(unittest.TestCase):
         self.assertIsNotNone(self.g.core.listeners['wh3pt_hotkey'])
         self.lua.execute("core:trigger_event('ComponentLClickUp', {string='wh3pt_open'})")
         self.assertTrue(self.g.widgets['wh3pt_panel'].visible)
-        self.assertEqual(self.g.widgets['wh3pt_lock_vigour'].priority,200)
+        self.assertEqual(self.g.widgets['wh3pt_gold_10000'].priority,200)
 
     def test_initialization_errors_are_written_to_mod_log(self):
         self.lua.execute("root.CreateComponent = function() error('native UI unavailable') end")
@@ -679,7 +810,7 @@ class InGameTests(unittest.TestCase):
         self.assertIn('native context not ready',self.g.logs[1])
         for name in ['wh3pt_click','wh3pt_moved','wh3pt_hotkey','wh3pt_char_select']:
             self.assertIsNotNone(self.g.core.listeners[name],name)
-        self.lua.execute("core:trigger_event('ComponentLClickUp', {string='wh3pt_tab_战役'})")
+        self.lua.execute("core:trigger_event('ComponentLClickUp', {string='wh3pt_tab_内政'})")
         self.assertFalse(self.g.widgets['wh3pt_card_order'].dead)
 
     def status_after_start(self,build_number):
@@ -770,14 +901,15 @@ class InGameTests(unittest.TestCase):
 
     def test_income_home_shortcut_presets_and_custom_input(self):
         self.api.click('open');self.api.click('income_open')
-        self.assertEqual(self.list_rows(),{'income'})
+        self.assertEqual(self.g.widgets['wh3pt_tab_内政'].state,'selected')
+        self.assertIn('income',self.list_rows())
         self.api.click('incomequick_500');self.drain_income()
         self.assertEqual(self.api.income.read(),(True,500))
         control=self.g.widgets['wh3pt_input_income']
         control.SetStateText(control,'275')
-        self.api.click('apply_income');self.drain_income()
+        self.api.click('toggle_income');self.drain_income()
         self.assertEqual(self.api.income.read(),(True,275))
-        self.api.click('tab_常用')
+        self.api.click('tab_总览')
         self.assertIn('+275%',self.g.widgets['wh3pt_income_open'].text)
         self.assertEqual(self.g.treasury_balance,5000)
 
@@ -798,14 +930,14 @@ class InGameTests(unittest.TestCase):
         self.assertIsNone(self.g.saved['wh3pt_player_order_value'])
         self.g.fail_read=True
         with self.assertRaisesRegex(Exception,'read unavailable'): self.api.read(self.feature('order'))
-        self.api.click('refresh')
-        self.api.click('tab_战役')
+        self.api.click('tab_内政')
         self.assertTrue(self.g.widgets['wh3pt_toggle_order'].disabled)
 
     def test_ui_input_search_favourites_paging_states_and_cleanup(self):
-        # Test DawnOfMan-style Home page (常用): lock tiles, treasury quick-add, active list & collapse
-        self.api.click('lock_vigour'); self.g.flush()
+        self.api.click('tab_战斗')
+        self.api.click('toggle_vigour'); self.g.flush()
         self.assertEqual(self.api.read(self.feature('vigour')),(True,1))
+        self.api.click('tab_总览')
         self.api.click('gold_10000')
         self.assertEqual(self.g.treasury_balance,15000)
         self.api.click('off_vigour'); self.g.flush()
@@ -813,33 +945,29 @@ class InGameTests(unittest.TestCase):
         self.api.click('collapse')
         self.assertEqual(self.g.widgets['wh3pt_panel'].w,68)
         self.assertIsNotNone(self.g.widgets['wh3pt_collapse_rail'])
-        self.api.click('tab_部队')
-        self.assertEqual(self.g.widgets['wh3pt_panel'].w,460)
-        self.assertEqual(self.g.widgets['wh3pt_apply_ward'].priority,200)
-        self.assertEqual(self.g.widgets['wh3pt_apply_ward'].text,'应用')
-        self.assertEqual(self.g.widgets['wh3pt_tab_部队'].state,'selected')
-        self.assertEqual(self.g.widgets['wh3pt_tab_战役'].state,'ghost')
+        self.api.click('tab_战斗')
+        self.assertEqual(self.g.widgets['wh3pt_panel'].w,520)
+        self.assertEqual(self.g.widgets['wh3pt_toggle_ward'].priority,200)
+        self.assertEqual(self.g.widgets['wh3pt_tab_战斗'].state,'selected')
+        self.assertEqual(self.g.widgets['wh3pt_tab_内政'].state,'ghost')
         self.assertEqual(self.g.widgets['wh3pt_toggle_ward'].text,'○ 关')
         self.g.widgets['wh3pt_input_ward'].SetStateText(self.g.widgets['wh3pt_input_ward'],'47.5')
-        self.api.click('apply_ward'); self.g.flush()
+        self.api.click('toggle_ward'); self.g.flush()
         self.assertEqual(self.api.read(self.feature('ward')),(True,47.5))
         self.assertEqual(self.g.widgets['wh3pt_card_ward'].state,'enabled')
-        self.assertEqual(self.g.widgets['wh3pt_apply_ward'].text,'应用')
         self.assertEqual(self.g.widgets['wh3pt_toggle_ward'].state,'enabled')
         self.assertEqual(self.g.widgets['wh3pt_toggle_ward'].text,'● 开')
-        self.assertIn('47.5',self.g.widgets['wh3pt_val_ward'].text)
         self.assertIn('1 项',self.g.widgets['wh3pt_rail_count'].text)
         self.api.click('fav_ward')
         self.assertEqual(self.g.widgets['wh3pt_fav_ward'].state,'star_lit')
-        self.api.click('tab_收藏')
+        self.api.click('tab_全部')
+        self.api.click('favourites_only')
         self.assertEqual(self.list_rows(),{'ward'})
-        self.api.click('plus_ward')
-        self.assertEqual(self.g.widgets['wh3pt_input_ward'].text,'52.5')
-        self.api.click('tab_特殊')
-        self.assertNotIn('· 100',self.g.widgets['wh3pt_info_attrition'].text)
+        self.assertEqual(self.g.widgets['wh3pt_favourites_only'].state,'selected')
+        self.api.click('tab_军队')
         self.assertIn('全军免疫战役非战斗损耗',self.g.widgets['wh3pt_info_attrition'].text)
         self.api.click('tab_全部')
-        self.assertEqual(len(self.list_rows()),35)
+        self.assertEqual(len(self.list_rows()),42)  # Mortarch rows need Nagash.
         self.g.widgets['wh3pt_search'].text='不存在的功能'
         self.api.click('search_go')
         self.assertEqual(self.list_rows(),set())
@@ -854,42 +982,109 @@ class InGameTests(unittest.TestCase):
         self.assertEqual(self.list_rows(),{'attack'})
         self.api.click('search_clear')
         self.assertEqual(self.g.widgets['wh3pt_search'].text,'')
-        self.assertEqual(len(self.list_rows()),35)
-        self.api.click('tab_收藏')
-        # Clear favourites for empty-state check, then restore via go_all
+        self.assertEqual(len(self.list_rows()),42)
+        self.api.click('favourites_only')
         self.api.click('fav_ward')
         self.assertIn('收藏夹还是空的',self.g.widgets['wh3pt_empty_t1'].text)
         self.api.click('go_all')
         self.assertEqual(self.g.widgets['wh3pt_tab_全部'].state,'selected')
+        self.assertEqual(len(self.list_rows()),42)
         self.api.click('rail_count')
         self.assertIn('正在生效',self.g.widgets['wh3pt_sheet_title'].text)
         self.api.click('sheet_close')
         self.api.clear(); self.g.flush()
         self.assertEqual(self.api.read(self.feature('ward')),(False,None))
 
+    def test_one_switch_applies_a_changed_value_otherwise_flips(self):
+        self.api.click('tab_战斗')
+        self.api.click('toggle_ward'); self.g.flush()
+        self.assertEqual(self.api.read(self.feature('ward')),(True,33))
+        self.api.click('plus_ward')
+        self.assertEqual(self.g.widgets['wh3pt_input_ward'].text,'38')
+        self.assertEqual(self.g.widgets['wh3pt_toggle_ward'].text,'应用')
+        self.assertEqual(self.api.read(self.feature('ward')),(True,33))
+        self.api.click('toggle_ward'); self.g.flush()
+        self.assertEqual(self.api.read(self.feature('ward')),(True,38))
+        self.assertEqual(self.g.widgets['wh3pt_toggle_ward'].text,'● 开')
+        typed=self.g.widgets['wh3pt_input_ward']
+        typed.SetStateText(typed,'40')
+        self.api.click('toggle_ward'); self.g.flush()
+        self.assertEqual(self.api.read(self.feature('ward')),(True,40))
+        self.api.click('toggle_ward'); self.g.flush()
+        self.assertEqual(self.api.read(self.feature('ward')),(False,None))
+
+    def test_every_feature_lives_on_exactly_one_page(self):
+        placed=[]
+        for index in range(1,len(self.api.pages)+1):
+            page=self.api.pages[index]
+            if page.sections:
+                for s in range(1,len(page.sections)+1):
+                    block=page.sections[s]
+                    placed+=[block[i] for i in range(2,len(block)+1)]
+        expected={d.id for d in self.api.catalog.values()}
+        expected|={c.id for c in self.api.commands.values() if not c.preset}
+        self.assertEqual(len(placed),len(set(placed)))
+        self.assertEqual(set(placed),expected)
+
+    def test_pages_are_context_first_and_favourites_cover_commands(self):
+        self.api.click('tab_战斗')
+        self.assertIn('手动战斗',self.g.widgets['wh3pt_strip_main'].text)
+        self.assertNotIn('手动战斗',self.g.widgets['wh3pt_info_healing'].text)
+        self.api.click('tab_内政')
+        self.assertIn('5,000 金',self.g.widgets['wh3pt_strip_main'].text)
+        self.assertIn('1,000 金',self.g.widgets['wh3pt_strip_sub'].text)
+        self.api.click('fav_treasury')
+        self.assertEqual(self.g.widgets['wh3pt_fav_treasury'].text,'★')
+        self.assertTrue(self.g.saved['wh3pt_player_treasury_favourite'])
+        self.api.click('tab_全部');self.api.click('favourites_only')
+        self.assertEqual(self.list_rows(),{'treasury'})
+        self.api.start()
+        self.api.click('tab_全部');self.api.click('favourites_only')
+        self.assertEqual(self.list_rows(),{'treasury'})
+
+    def test_section_titles_name_their_page_only_on_the_all_page(self):
+        self.api.click('tab_军队')
+        self.assertEqual(self.g.widgets['wh3pt_sec_军队1'].text,'行军')
+        self.api.click('tab_全部')
+        self.assertEqual(self.g.widgets['wh3pt_sec_军队1'].text,'军队 · 行军')
+
+    def test_selected_character_shows_a_name_when_the_game_provides_one(self):
+        self.lua.execute("""
+            common={get_localised_string=function(key) return ({first='卡尔',last='弗兰茨'})[key] end}
+            characters[1].get_forename=function() return 'first' end
+            characters[1].get_surname=function() return 'last' end
+            function cm:get_character_by_cqi() return characters[1] end
+            core:trigger_event('CharacterSelected', {character=function() return characters[1] end})
+        """)
+        self.api.click('tab_军队')
+        self.assertIn('已选中 卡尔 弗兰茨',self.g.widgets['wh3pt_strip_main'].text)
+
     def test_commands_presets_and_shortcuts(self):
-        self.api.click('tab_指令')
-        self.assertIn('指令',self.g.widgets['wh3pt_title'].text)
-        self.assertIn('未选中',self.g.widgets['wh3pt_target_info'].text)
+        self.api.click('tab_军队')
+        self.assertIn('军队',self.g.widgets['wh3pt_title'].text)
+        self.assertIn('未选中',self.g.widgets['wh3pt_strip_main'].text)
+        self.api.click('tab_内政')
         self.g.widgets['wh3pt_cinput_treasury'].SetStateText(self.g.widgets['wh3pt_cinput_treasury'],'80000')
         self.api.click('cmd_treasury')
         self.assertEqual(self.g.treasury_balance,85000)
+        self.api.click('tab_军队')
         self.api.click('cmd_move_all')
         self.assertEqual(len(self.g.replenished_characters),2)
         self.api.click('cmd_xp_all')
         self.assertEqual(self.g.character_xp['character_cqi:101'],10000)
         self.assertEqual(self.g.character_xp['character_cqi:102'],10000)
         self.lua.execute("core:trigger_event('CharacterSelected', {character=function() return characters[2] end})")
+        self.api.click('tab_军队')
+        self.assertIn('已选中',self.g.widgets['wh3pt_strip_main'].text)
         self.api.click('cmd_xp_selected')
         self.assertEqual(self.g.character_xp['character_cqi:101'],10000)
         self.assertEqual(self.g.character_xp['character_cqi:102'],20000)
-        self.api.click('preset_menu')
-        self.api.click('preset_campaign'); self.g.flush()
+        self.api.click('tab_总览')
+        self.api.click('cmd_preset_campaign'); self.g.flush()
         self.assertEqual(self.api.read(self.feature('order')),(True,50))
         self.assertEqual(self.api.read(self.feature('growth')),(True,500))
         self.assertEqual(self.api.read(self.feature('construction')),(True,500))
-        self.api.click('preset_menu')
-        self.api.click('preset_battle'); self.g.flush()
+        self.api.click('cmd_preset_battle'); self.g.flush()
         self.assertEqual(self.api.read(self.feature('ward')),(True,33))
         self.assertEqual(self.api.read(self.feature('attack')),(True,50))
         self.assertFalse(self.g.widgets['wh3pt_panel'].visible)
@@ -898,10 +1093,8 @@ class InGameTests(unittest.TestCase):
         self.lua.execute("core:trigger_event('ShortcutTriggered', {string='camera_bookmark_view0'})")
         self.assertFalse(self.g.widgets['wh3pt_panel'].visible)
 
-    def test_target_command_page_and_clear_all(self):
-        self.api.click('tab_指令')
-        self.api.click('command_next')
-        self.assertIn('2/2', self.g.widgets['wh3pt_command_page'].text)
+    def test_army_commands_and_clear_all(self):
+        self.api.click('tab_军队')
         self.assertEqual(self.g.widgets['wh3pt_cinput_unit_rank'].text, '9')
         self.api.click('cmd_free_skills')
         self.assertTrue(self.api.targets().enabled())
@@ -911,8 +1104,8 @@ class InGameTests(unittest.TestCase):
         self.assertIn('script\\battle\\mod\\wh3pt_battle.lua', self.files)
 
     def test_mortarch_building_command_is_player_scoped_and_dispatches_native_unlock(self):
-        self.api.click('tab_指令');self.api.click('command_next')
-        self.assertTrue(self.g.widgets['wh3pt_cmd_mortarch_buildings'].disabled)
+        self.api.click('tab_军队')
+        self.assertIsNone(self.g.widgets['wh3pt_cmd_mortarch_buildings'])
         self.lua.execute("""
             local f=cm:get_faction('player')
             function f:name() return 'wh3_dlc29_nag_host_of_nagash' end
@@ -924,7 +1117,7 @@ class InGameTests(unittest.TestCase):
                 assert(owner=='wh3_dlc29_nag_host_of_nagash');building_calls[building]=true
             end
         """)
-        self.api.click('command_prev');self.api.click('command_next')
+        self.api.click('tab_内政');self.api.click('tab_军队')
         self.assertFalse(self.g.widgets['wh3pt_cmd_mortarch_buildings'].disabled)
         self.api.click('cmd_mortarch_buildings')
         self.assertEqual(len(list(self.g.building_calls.keys())),2)
@@ -954,7 +1147,7 @@ class InGameTests(unittest.TestCase):
             self.assertIsNone(self.g.bundles['wh3pt_' + key])
         self.api.start()  # saved preferences survive rebuilding the campaign panel
         self.assertEqual(self.api.read(self.feature('battle_magic')), (True, 1))
-        self.api.click('open'); self.api.click('tab_特殊')
+        self.api.click('open'); self.api.click('tab_战斗')
         for key in ('battle_magic', 'battle_cooldown'):
             self.assertIsNotNone(self.g.widgets['wh3pt_toggle_' + key])
         self.api.click('toggle_battle_magic')
@@ -974,6 +1167,18 @@ class InGameTests(unittest.TestCase):
         self.lua.execute("core:trigger_event('BattleBeingFought', {is_autoresolved=function() return false end})")
         self.assertFalse(self.g.svr.wh3pt_magic_enabled)
         self.assertTrue(self.g.svr.wh3pt_cooldown_enabled)
+
+    def test_perfect_vigour_is_published_to_the_manual_battle(self):
+        battle = "core:trigger_event('BattleBeingFought', {is_autoresolved=function() return false end})"
+        self.api.apply('vigour', True, '1'); self.g.flush()
+        self.lua.execute(battle)
+        self.assertTrue(self.g.svr.wh3pt_vigour_enabled)
+        self.assertTrue(self.g.svr.wh3pt_magic_pending)
+        self.assertEqual(self.api.read_model(self.feature('vigour')), (True, 1))
+        self.lua.execute("core:trigger_event('BattleConflictFinished', {})")
+        self.api.apply('vigour', False, None); self.g.flush()
+        self.lua.execute(battle)
+        self.assertFalse(self.g.svr.wh3pt_vigour_enabled)
 
     def test_all_manual_features_commit_and_cleanup_through_campaign_events(self):
         for definition in self.api.catalog.values():
@@ -1102,9 +1307,9 @@ class InGameTests(unittest.TestCase):
     def show(self,view):
         api=self.api
         if view=='collapsed':
-            api.click('tab_常用'); api.click('collapse')
+            api.click('tab_总览'); api.click('collapse')
         elif view=='sheet':
-            api.click('tab_常用'); api.click('rail_count')
+            api.click('tab_总览'); api.click('rail_count')
         elif view=='preset':
             api.click('tab_全部'); api.click('preset_menu')
         else:
@@ -1114,7 +1319,8 @@ class InGameTests(unittest.TestCase):
         return [w for w in self.g.widgets.values() if w.id!='root' and not w.dead]
 
     def list_rows(self):
-        return {w.id[len('wh3pt_row_'):] for w in self.live() if w.id.startswith('wh3pt_row_')}
+        return {w.id[len('wh3pt_row_'):] for w in self.live()
+                if w.id.startswith('wh3pt_row_') and not w.id.startswith('wh3pt_row_section_')}
 
     def in_list(self,w):
         """List content scrolls and is clipped, so it may lie beyond the panel."""
@@ -1169,10 +1375,10 @@ class InGameTests(unittest.TestCase):
                 self.g.screen_width=width; self.g.screen_height=height; self.g.text_scale=ts
                 self.api.start()
                 layout=self.api.layout()
-                expected=min(ts,(width-32)/460,(height-28)/678)
+                expected=min(ts,(width-32)/520,(height-28)/678)
                 self.assertAlmostEqual(layout.scale,expected,3)
                 self.assertEqual(layout.clamped,expected<ts-0.001)
-                self.assertEqual(self.g.widgets['wh3pt_panel'].w,round(460*layout.scale))
+                self.assertEqual(self.g.widgets['wh3pt_panel'].w,round(520*layout.scale))
                 for view in VIEWS:
                     with self.subTest(res=(width,height),text_scale=ts,view=view):
                         self.show(view)
@@ -1185,12 +1391,12 @@ class InGameTests(unittest.TestCase):
         self.api.start(); self.api.click('open')
         self.assertEqual(self.api.layout().scale,1.5)
         self.assertEqual(self.api.layout().probe_w,210)
-        self.assertEqual(self.g.widgets['wh3pt_tab_常用'].state,'selected')
-        self.assertEqual(self.g.widgets['wh3pt_panel'].w,690)
+        self.assertEqual(self.g.widgets['wh3pt_tab_总览'].state,'selected')
+        self.assertEqual(self.g.widgets['wh3pt_panel'].w,780)
         # Clamped extreme: fonts step down, long text is truncated on UTF-8
         # boundaries with an ellipsis and never exceeds its component.
         self.g.screen_width,self.g.screen_height,self.g.text_scale=1280,720,2.0
-        self.api.start(); self.api.click('tab_战役')
+        self.api.start(); self.api.click('tab_内政')
         self.assertTrue(self.api.layout().clamped)
         cut=[w for w in self.live() if w.text.endswith('…')]
         self.assertTrue(cut)
@@ -1198,7 +1404,7 @@ class InGameTests(unittest.TestCase):
         for w in cut:
             self.assertIsInstance(w.text,str)
             self.assertNotIn('\ufffd',w.text)
-        self.assertEqual(self.g.widgets['wh3pt_tab_战役'].state.replace('_sm',''),'selected')
+        self.assertEqual(self.g.widgets['wh3pt_tab_内政'].state.replace('_sm',''),'selected')
 
     def test_missing_text_dimensions_and_resolution_apis_fall_back(self):
         self.lua.execute('text_dimensions_enabled=false; core.get_screen_resolution=nil')
@@ -1225,7 +1431,7 @@ class InGameTests(unittest.TestCase):
         self.api.click('ui_scale')
         self.assertEqual(self.g.saved['wh3pt_ui_scale'],1.25)
         self.assertEqual(self.api.layout().scale,1.25)
-        self.assertEqual(self.g.widgets['wh3pt_panel'].w,575)
+        self.assertEqual(self.g.widgets['wh3pt_panel'].w,650)
         self.assertIn('125%',self.g.widgets['wh3pt_ui_scale'].text)
         self.api.start()
         self.assertEqual(self.api.layout().scale,1.25)
@@ -1272,7 +1478,7 @@ class InGameTests(unittest.TestCase):
     def test_wrapping_text_is_truncated_instead_of_trusting_its_narrow_block(self):
         self.g.text_wraps=True
         self.g.screen_width,self.g.screen_height,self.g.text_scale=1280,720,2.0
-        self.api.start(); self.api.click('open'); self.api.click('tab_战役')
+        self.api.start(); self.api.click('open'); self.api.click('tab_内政')
         self.assertTrue([w for w in self.live() if w.text.endswith('…')])
         for w in self.live():
             if w.template=='ui/wh3pt/label' and w.text:
@@ -1315,8 +1521,6 @@ class InGameTests(unittest.TestCase):
         self.api.click('sheet_close')
         self.assertTrue(self.g.widgets['wh3pt_sheet_title'].dead)
         self.assertEqual(self.list_rows(),set())
-        self.api.click('lock_all'); self.g.flush()
-        self.assertIn('0 / 7',self.g.widgets['wh3pt_secr_locks'].text)
 
     # ---- Scrolling and dragging --------------------------------------------------
     def test_scroll_viewport_is_fixed_and_uses_native_clipping(self):
@@ -1331,6 +1535,16 @@ class InGameTests(unittest.TestCase):
         self.assertNotEqual(state.get('interactive'), 'true')
         self.assertEqual(root.find('components/list_box/LayoutEngine').get('sizetocontent'), 'true')
         self.assertIsNotNone(root.find("components/list/callbackwithcontextlist/callback_with_context[@callback_id='Listview']"))
+
+    def test_wheel_moves_one_row_not_the_whole_list(self):
+        # All rows share one child of list_box, so the slider must not step by child.
+        root = ET.fromstring(self.files['ui\\wh3pt\\list.twui.xml'])
+        properties = {p.get('name'): p.get('value') for p in root.findall('components/vslider/user_properties/property')}
+        self.assertIn('constant_step_size', properties)
+        self.assertEqual(properties['step_size'], '56')
+        self.api.click('open'); self.api.click('tab_全部')
+        scale = self.api.layout().scale
+        self.assertEqual(self.g.widgets['vslider'].properties.step_size, str(int(56 * scale + 0.5)))
 
     def test_no_page_controls_remain(self):
         self.api.click('open'); self.api.click('tab_全部')
@@ -1353,17 +1567,17 @@ class InGameTests(unittest.TestCase):
         self.assertEqual(self.g.widgets['wh3pt_list'].seq,view)
         self.assertEqual(self.g.widgets['wh3pt_card_attack'].seq,other)
         self.assertEqual(self.g.widgets['wh3pt_input_defence'].text,'25')
-        self.api.click('tab_部队')
+        self.api.click('tab_战斗')
         self.assertNotEqual(self.g.widgets['wh3pt_list'].seq,view)
 
     def test_rebuilt_row_lands_where_the_list_has_scrolled_to(self):
-        self.api.click('open'); self.api.click('tab_部队')
+        self.api.click('open'); self.api.click('tab_战斗')
         content=self.g.widgets['wh3pt_list_content']
-        first=self.g.widgets['wh3pt_card_ward']
-        self.assertEqual((first.x,first.y),(content.x,content.y))
+        first=self.g.widgets['wh3pt_card_healing']
+        self.assertEqual((first.x,first.y),(content.x,content.y+30))
         content.MoveTo(content,content.x,content.y-150)
-        self.api.click('toggle_ward'); self.g.flush()
-        self.assertEqual(self.g.widgets['wh3pt_card_ward'].y,content.y)
+        self.api.click('toggle_healing'); self.g.flush()
+        self.assertEqual(self.g.widgets['wh3pt_card_healing'].y,content.y+30)
 
     def test_launcher_drag_is_remembered_and_is_not_a_click(self):
         launcher=self.g.widgets['wh3pt_open']
@@ -1392,7 +1606,7 @@ class InGameTests(unittest.TestCase):
         self.api.click('collapse_rail')
         panel=self.g.widgets['wh3pt_panel']
         self.assertEqual((panel.x,panel.y),(500,300))
-        self.assertEqual(panel.w,460)
+        self.assertEqual(panel.w,520)
         self.g.widgets['wh3pt_panel'].MoveTo(self.g.widgets['wh3pt_panel'],1800,900)
         self.lua.execute("core:trigger_event('ComponentMoved', {string='wh3pt_panel'})")
         self.api.start()
@@ -1401,13 +1615,13 @@ class InGameTests(unittest.TestCase):
         self.assertLessEqual(panel.y+panel.h,self.g.screen_height)
 
     def test_content_follows_a_dragged_panel(self):
-        self.api.click('open'); self.api.click('tab_战役')
+        self.api.click('open'); self.api.click('tab_内政')
         panel=self.g.widgets['wh3pt_panel']
         panel.MoveTo(panel,100,120)
-        self.api.click('tab_部队')
+        self.api.click('tab_战斗')
         self.assertEqual(self.g.widgets['wh3pt_list'].x,100+80)
-        self.assertEqual(self.g.widgets['wh3pt_search'].y,120+60)
-        self.assertEqual(self.g.widgets['wh3pt_card_ward'].y,120+102)
+        self.assertEqual(self.g.widgets['wh3pt_strip'].y,120+60)
+        self.assertEqual(self.g.widgets['wh3pt_card_healing'].y,120+102+30)
 
     def test_pack_has_no_always_on_handicaps_or_global_cap_and_unique_abilities(self):
         self.assertFalse(any('campaign_difficulty_handicap' in n or '_kv_' in n for n in self.files))
@@ -1500,7 +1714,7 @@ class InGameTests(unittest.TestCase):
         self.assertIn('被动',self.feature('chainsword').hint)
         for feature in ('healing','revive','ammo'):
             self.assertIn('自身',self.feature(feature).hint)
-            self.assertEqual(self.feature(feature).unit,'% / 秒')
+            self.assertEqual(self.feature(feature).unit,'%/秒')
 
 
 if __name__ == '__main__': unittest.main()

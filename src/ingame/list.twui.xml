@@ -71,6 +71,8 @@
     <property name="Value" value="0" />
     <property name="maxValue" value="100" />
     <property name="minValue" value="0" />
+    <property name="constant_step_size" value="" />
+    <property name="step_size" value="56" />
    </user_properties>
    <localised_texts>
     <localised_text />

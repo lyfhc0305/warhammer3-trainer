@@ -8,29 +8,19 @@ local literal_find = string.find_lua or string.find
 -- native UTF-8 implementation and preserve localized suffixes intact.
 local substring = string.sub_lua or string.sub
 local definitions, command_defs, draft, cmd_draft, favourites, controls = {}, {}, {}, {}, {}, {}
-local panel, launcher, search, status_ui, status_dot_ui, preset_ui, list_ui
-local group, query, search_text, visible, collapsed, busy = '常用', '', '', false, false, false
-local preset_open, active_sheet = false, false
+local panel, launcher, search, status_ui, status_dot_ui, list_ui
+local group, query, search_text, visible, collapsed, busy = '总览', '', '', false, false, false
+local active_sheet, only_favourites = false, false
 local current_rows, faction_name, selected_cqi = {}, nil, nil
 local status, status_error = '就绪：仅作用于当前玩家势力', false
-local render, create_ui, refit, set_native_recruitment, reset_player_context
+local render, create_ui, refit, set_native_recruitment, reset_player_context, elite_tabs
 local player_epoch = 0
 local manual_battle
-local target_actions, command_page = nil, 1
+local target_actions
 local mortarch_actions
 local income_actions
 local resource_interface
 local rows_parent, overlay_parent, title_ui, rail_count_ui
-
-local LOCK_TILES = {
-    {id='vigour', short='完美活力'},
-    {id='unbreakable', short='全军不溃'},
-    {id='attrition', short='免疫损耗'},
-    {id='foreign_replenishment', short='异地补员'},
-    {id='replenishment_cap', short='突破上限'},
-    {id='vanguard', short='先锋部署'},
-    {id='chainsword', short='链锯剑'},
-}
 
 -- label keeps the long form for validation messages; short/hint are display text.
 local COMMANDS = {
@@ -59,27 +49,33 @@ local BATTLE_PRESET = {
     {'reload', 100}, {'vigour', 1}, {'unbreakable', 1},
 }
 
-local PAGE_TITLES = {
-    ['常用'] = '常用功能',
-    ['指令'] = '选中与指令',
-    ['战役'] = '战役加成',
-    ['部队'] = '部队属性',
-    ['特殊'] = '特殊能力',
-    ['收藏'] = '收藏夹',
-    ['全部'] = '全部功能',
-    ['精英'] = '精英部队招募',
+-- Features sit where they act, so nobody has to guess the page. A section is its
+-- title followed by catalog or command ids; a test keeps this list complete.
+local PAGES = {
+    {name='总览', title='总览'},
+    {name='内政', title='内政与经济', sections={
+        {'资金与收入', 'treasury', 'income', 'upkeep'},
+        {'建设与科技', 'growth', 'construction', 'research'},
+        {'秩序与外交', 'order', 'diplomacy'},
+    }},
+    {name='军队', title='军队与将领', sections={
+        {'行军', 'move_all', 'move_selected', 'movement', 'attrition'},
+        {'招募与补员', 'recruitment', 'foreign_replenishment', 'replenishment_cap', 'unit_rank'},
+        {'将领与英雄', 'xp_selected', 'xp_all', 'free_skills', 'agent_player'},
+        {'阵营专属', 'mortarchs', 'mortarch_buildings'},
+    }},
+    {name='战斗', title='手动战斗加成', sections={
+        {'恢复', 'healing', 'revive', 'ammo'},
+        {'魔法', 'battle_magic', 'battle_cooldown'},
+        {'特性', 'vigour', 'unbreakable', 'vanguard', 'chainsword'},
+        {'进攻', 'attack', 'weapon', 'missile_damage', 'range', 'reload', 'ammunition'},
+        {'防御', 'defence', 'armour', 'ward', 'missile_resistance', 'health'},
+        {'机动', 'speed', 'mass'},
+    }},
+    {name='精英', title='精英部队招募'},
+    {name='全部', title='全部功能'},
 }
-
-local RAIL_ITEMS = {
-    {name='常用'},
-    {name='指令'},
-    {name='战役'},
-    {name='部队'},
-    {name='特殊'},
-    {name='收藏'},
-    {name='全部'},
-    {name='精英'},
-}
+for _, page in ipairs(PAGES) do PAGES[page.name] = page end
 
 local function faction()
     if cm:is_multiplayer() then error('内置修改器仅支持单人战役') end
@@ -338,41 +334,6 @@ local function apply_preset(pairs_list, title)
     if all_manual then finish() else player_callback(finish, 0.1) end
 end
 
-local function toggle_all_locks()
-    if busy then error('请等待上一次操作回读完成') end
-    local f = faction()
-    local all_on = true
-    for _, tile in ipairs(LOCK_TILES) do
-        local def = definitions[tile.id]
-        if def and not read(def) then all_on = false; break end
-    end
-    local target_on = not all_on
-    for _, tile in ipairs(LOCK_TILES) do
-        local def = definitions[tile.id]
-        if def then
-            if target_on then
-                apply_single_bundle(f, def, def.default)
-            else
-                disable_feature(def)
-            end
-        end
-    end
-    busy = true
-    player_callback(function()
-        busy = false
-        guarded(function()
-            for _, tile in ipairs(LOCK_TILES) do
-                local def = definitions[tile.id]
-                if def and read(def) ~= target_on then
-                    error('状态锁定回读不一致：' .. def.label)
-                end
-            end
-            message(target_on and '已锁定全部 7 项核心状态' or '已解除全部 7 项核心状态锁定')
-        end)
-        if render then guarded(render) end
-    end, 0.1)
-end
-
 local function clear_all()
     if busy then error('请等待上一次操作完成') end
     faction()
@@ -625,7 +586,7 @@ local function native_recruitment_display()
     if type(find_uicomponent) ~= 'function' then return nil end
     return find_uicomponent(core:get_ui_root(), 'main_units_panel', 'recruitment_options', 'mercenary_display')
 end
-local function mark_native_unlocked_cards()
+local function arrange_native_cards()
     -- Native recruitment rebuilds its cards when the pool changes. Never retain
     -- UIComponent handles across callbacks: pcall cannot catch stale C++ pointers.
     local display = native_recruitment_display()
@@ -633,29 +594,46 @@ local function mark_native_unlocked_cards()
     -- Collapse only matched pairs in this native list. Keep a marker ON the
     -- original so restoration never depends on a cached C++ UI handle.
     -- Off-screen cards still count: Visible(false) ignores scroll clipping.
-    local by_key, budget = {}, 4000
-    local known = {}
+    local by_key, budget = {}, 20000
+    local known, cards, boxes, named, list_view = {}, {}, {}, {}, nil
     for _, def in ipairs(STRATEGIC.units) do known[def.id] = true; known[def.native_key] = true end
-    local function walk(node, depth, entry)
-        if depth > 24 or budget <= 0 then return end
+    local function walk(node, depth, entry, cell, in_view)
+        if depth > 24 or budget <= 0 or named[cell] then return end
         budget = budget - 1
         local id = node:Id()
+        if id == 'unit_listview_holder' then return end
         local card = entry or node
-        local key = known[id] and id or nil
+        local key, record = known[id] and id or nil, nil
         if not key then
             local ok, value = pcall(function() return node:GetContextObject('CcoMainUnitRecord'):Call('Key') end)
-            if ok and known[value] then key = value end
+            if ok and type(value) == 'string' and value ~= '' then
+                record = value
+                if known[value] then key = value end
+            end
         end
         if key and not by_key[key] then by_key[key] = card end
+        -- Cells of the horizontal list are the cards; one is done once it has a name.
+        if cell and (key or record) then
+            named[cell] = true
+            cards[#cards + 1] = {node = cell, key = key or record}
+            return
+        end
+        if id == 'listview' then
+            in_view = true
+            list_view = list_view or node
+        end
+        local row = in_view and id == 'list_box'
+        if row then boxes[#boxes + 1] = node end
         for i = 0, node:ChildCount() - 1 do
             local child = UIComponent(node:Find(i))
             if child then
                 local next_entry = id == 'list_box' and child or entry
-                walk(child, depth + 1, next_entry)
+                walk(child, depth + 1, next_entry, row and child or cell, in_view)
             end
         end
     end
-    walk(display, 0, nil)
+    walk(display, 0, nil, nil, false)
+    elite_tabs.reveal(cards)
     for _, def in ipairs(STRATEGIC.units) do
         local unlocked = by_key[def.native_key]
         local original = by_key[def.id]
@@ -675,27 +653,9 @@ local function mark_native_unlocked_cards()
                 marker:SetStateText('')
             end
         end
-        if unlocked then
-            local address = unlocked:Find(PREFIX .. 'unlocked_badge')
-            local badge = address and UIComponent(address) or nil
-            if native_wanted(def) then
-                if not badge then
-                    badge = UIComponent(unlocked:CreateComponent(PREFIX .. 'unlocked_badge', 'ui/wh3pt/label'))
-                end
-                local x, y = unlocked:Position()
-                local w = unlocked:Dimensions()
-                badge:SetDockingPoint(0)
-                badge:SetDockOffset(0, 0)
-                badge:SetCanResizeWidth(true); badge:SetCanResizeHeight(true)
-                badge:Resize(w, 22)
-                badge:SetState('accent_center')
-                badge:SetStateText('已解锁')
-                badge:MoveTo(x, y + 30)
-                badge:PropagatePriority(200)
-                badge:SetVisible(true)
-            elseif badge then badge:SetVisible(false) end
-        end
     end
+    local found = display:Find('mercenary_recruitment_pool_list', false)
+    elite_tabs.apply(found and UIComponent(found) or nil, list_view, boxes, cards, native_enabled)
 end
 local function schedule_native_sync(announce)
     if native_pending then return end
@@ -709,7 +669,7 @@ local function schedule_native_sync(announce)
                 if revision ~= native_revision then return end
                 guarded(function()
                     verify_native_pool(expected)
-                    mark_native_unlocked_cards()
+                    arrange_native_cards()
                     if announce then message(native_enabled and '已解锁精英，重复兵牌合并显示；请重开精英招募框' or '精英解锁已关闭；已招募部队保留') end
                 end)
                 if render then guarded(render) end
@@ -798,17 +758,17 @@ end
 -- Every coordinate passed to component()/label()/button()/card() is a design
 -- unit: the layout at 100% UI scale, relative to the panel origin. px()
 -- multiplies by S, which is calibrated in compute_scale() at create_ui() time.
-local DESIGN_W, DESIGN_H = 460, 640
+local DESIGN_W, DESIGN_H = 520, 640
 local RAIL_W = 68
 local CX = RAIL_W + 12              -- content column left edge
 local CW = DESIGN_W - CX - 14       -- content column width
-local PAGE_Y, LIST_Y = 62, 102      -- first content row without / with the search bar
+local PAGE_Y, LIST_Y = 62, 102      -- first content row without / with the page strip
 local FOOTER_Y = DESIGN_H - 46      -- footer divider
 local CONTENT_BOTTOM = FOOTER_Y - 8
 local FRAME_INSET = 4               -- thickness of the panel frame texture
-local ROW_NUMERIC_H, ROW_TOGGLE_H, ROW_GAP = 66, 56, 6
+local ROW_H, ROW_GAP, SECTION_H = 52, 4, 30
 local ROW_W = CW - 18               -- list rows; the rest is the native scrollbar
-local RAIL_H = 56 + 9 * 36 + 92     -- height of the collapsed panel
+local RAIL_H = 56 + (#PAGES + 1) * 36 + 92   -- height of the collapsed panel
 local DRAG_SLOP = 6                 -- screen pixels a press may wander and stay a click
 local LAUNCHER_W, LAUNCHER_H, LAUNCHER_GAP = 116, 30, 8
 local LAUNCHER_CLEARANCE = 56       -- kept free left of the native tab strip
@@ -1014,6 +974,8 @@ local function make(parent, id, template, kind, x, y, w, h, text, state)
     return u
 end
 
+elite_tabs = create_elite_tabs({units=STRATEGIC.units, prefix=PREFIX, px=px, make=make})
+
 -- Design-unit constructor relative to the panel origin. Edges are rounded,
 -- so a child whose design rect is inside the panel stays inside in pixels.
 local function component(parent, id, template, kind, dx, dy, dw, dh, text, state)
@@ -1135,17 +1097,10 @@ local function group_digits(n)
     return (neg and '-' or '') .. s .. tail
 end
 
-local function value_text(def, actual)
-    if def.toggle then return '已开启' end
-    return tostring(def.choices and def.choices[actual] or actual) .. def.unit
-end
-
-local function row_detail(def, ok, active, actual)
-    if not ok then return '读取失败，请刷新' end
-    if def.manual_battle then return '仅手动战斗 · ' .. (def.hint or '不影响战前预测/自动结算') end
+local function row_detail(def, ok)
+    if not ok then return '读取失败，请重新打开面板' end
     if def.hint and def.hint ~= '' then return def.hint end
-    if def.toggle then return active and '已开启' or '点击右侧开关开启' end
-    return '范围 0～' .. tostring(def.choices and def.choices[#def.choices] or def.max) .. def.unit
+    return '范围 ' .. tostring(def.min or 0) .. '～' .. tostring(def.max) .. def.unit
 end
 
 local function section(parent, id, dy, title, right_text)
@@ -1163,91 +1118,64 @@ local function active_row(parent, prefix, it, x, w, ry)
     button(parent, 'off_' .. id, x + w - 34, ry + 3, 30, 26, '×', 'ghost_card')
 end
 
-local function draw_search(parent)
-    local sw = CW - 56 - 6 - 32 - 6
+local function draw_search(parent, with_favourites)
+    local extra = with_favourites and 38 or 0
+    local sw = CW - 56 - 6 - 32 - 6 - extra
     search = input(parent, 'search', CX, 60, sw, 32, search_text)
     button(parent, 'search_go', CX + sw + 6, 60, 56, 32, '搜索', 'active')
-    button(parent, 'search_clear', CX + CW - 32, 60, 32, 32, '×', query ~= '' and 'active' or 'ghost_page')
+    button(parent, 'search_clear', CX + CW - 32 - extra, 60, 32, 32, '×', query ~= '' and 'active' or 'ghost_page')
+    if with_favourites then
+        button(parent, 'favourites_only', CX + CW - 32, 60, 32, 32, only_favourites and '★' or '☆',
+            only_favourites and 'selected' or 'active')
+    end
 end
 
-local function draw_preset_menu()
-    local mx, my, mw = CX + CW - 212, 46, 212
-    local items = {
-        {'preset_campaign', '战役发育预设'}, {'preset_battle', '精锐战斗预设'},
-        {'quick_move', '全军行动力恢复'}, {'refresh', '刷新状态'},
-    }
-    local mh = #items * 36 + 12
-    overlay_parent = label(panel, 'overlay', mx, my, mw, mh, '')
-    card(overlay_parent, 'preset_drop', mx, my, mw, mh, '', 'raise')
-    for i, item in ipairs(items) do
-        local b = button(overlay_parent, item[1], mx + 6, my + 6 + (i - 1) * 36, mw - 12, 32, item[2], 'active')
-        b:SetDisabled(busy and item[1] ~= 'refresh')
+local function selected_name()
+    local ok, name = pcall(function()
+        local ch = cm:get_character_by_cqi(selected_cqi)
+        local surname = ch:get_surname()
+        return common.get_localised_string(ch:get_forename())
+            .. (surname ~= '' and (' ' .. common.get_localised_string(surname)) or '')
+    end)
+    return ok and name ~= '' and name or ('#' .. tostring(selected_cqi))
+end
+
+-- One strip of context above a page: what the page acts on right now.
+local function draw_strip(parent)
+    if group == '全部' then return draw_search(parent, true) end
+    local main, sub, lit = '', '', false
+    local ok_f, f = pcall(faction)
+    if group == '军队' then
+        local count = tostring(#(ok_f and collect_characters(f, false) or {}))
+        lit = selected_cqi ~= nil
+        main = (lit and ('已选中 ' .. selected_name()) or '未选中角色') .. ' · 在役将领 ' .. count .. ' 名'
+        sub = target_actions and target_actions.summary() or '请先选中我方军队'
+    elseif group == '内政' then
+        main = '国库 ' .. ((ok_f and f.treasury) and (group_digits(f:treasury()) .. ' 金') or '—')
+        local ok_i, income = pcall(function() return f:income() end)
+        sub = ok_i and type(income) == 'number' and ('预计每回合收入 ' .. group_digits(income) .. ' 金') or '预计收入以顶栏为准'
+    else
+        main, sub = '全部只在手动战斗生效', '战役地图上只保存设置；不影响战前预测和自动结算'
     end
+    card(parent, 'strip', CX, 60, CW, 38, '', lit and 'accent' or 'active')
+    label(parent, 'strip_main', CX + 14, 62, CW - 28, 18, main, lit and 'accent' or 'muted')
+    label(parent, 'strip_sub', CX + 14, 80, CW - 28, 16, sub, 'hint')
 end
 
 local function draw_home(parent, act_list)
-    local tile_on, tile_ok, locked, all_ok = {}, {}, 0, true
-    for i, tile in ipairs(LOCK_TILES) do
-        local def = definitions[tile.id]
-        local ok, on = false, false
-        if def then ok, on = pcall(read, def) end
-        tile_ok[i], tile_on[i] = ok, ok and on
-        if not ok then all_ok = false end
-        if ok and on then locked = locked + 1 end
-    end
-    section(parent, 'locks', PAGE_Y, '状态锁定', tostring(locked) .. ' / 7 已锁定')
-    local gap, th = 8, 56
-    local tw = (CW - 3 * gap) / 4
-    for i = 1, 8 do
-        local tx = CX + ((i - 1) % 4) * (tw + gap)
-        local ty = PAGE_Y + 30 + math.floor((i - 1) / 4) * (th + gap)
-        if i <= 7 then
-            local tile, ok, on = LOCK_TILES[i], tile_ok[i], tile_on[i]
-            local b = button(parent, 'lock_' .. tile.id, tx, ty, tw, th, '', not ok and 'inactive' or on and 'enabled' or 'active')
-            b:SetDisabled(not ok or busy)
-            label(parent, 'ltitle_' .. tile.id, tx + 4, ty + 6, tw - 8, 24, tile.short, 'center')
-            label(parent, 'lsub_' .. tile.id, tx + 4, ty + 29, tw - 8, 22,
-                not ok and '读取失败' or on and '● 已锁定' or '未开启', on and 'accent_center' or 'quiet_center')
-        else
-            local all_on = locked == 7
-            local b = button(parent, 'lock_all', tx, ty, tw, th, '', not all_ok and 'inactive' or all_on and 'enabled' or 'active')
-            b:SetDisabled(not all_ok or busy)
-            label(parent, 'ltitle_all', tx + 4, ty + 6, tw - 8, 24, all_on and '全部解除' or '全部锁定', 'center')
-            label(parent, 'lsub_all', tx + 4, ty + 29, tw - 8, 22,
-                not all_ok and '读取失败' or (tostring(locked) .. ' / 7'), all_on and 'accent_center' or 'quiet_center')
-        end
-    end
-
-    local ay = PAGE_Y + 30 + 2 * th + gap + 14
-    section(parent, 'aura', ay, '战场恢复', '每队每秒')
-    local aw = (CW - 2 * gap) / 3
-    for idx, key in ipairs({'healing', 'revive', 'ammo'}) do
-        local def = definitions[key]
-        local ok, on, actual = false, false, nil
-        if def then ok, on, actual = pcall(read, def) end
-        local ax, aty = CX + (idx - 1) * (aw + gap), ay + 30
-        local b = button(parent, 'toggle_' .. key, ax, aty, aw, th, '', not ok and 'inactive' or on and 'enabled' or 'active')
-        b:SetDisabled(not ok or busy)
-        label(parent, 'atitle_' .. key, ax + 4, aty + 6, aw - 8, 24, def and def.label or key, 'center')
-        local sub = not ok and '读取失败' or on and ('● ' .. tostring(def.choices[actual]) .. '%') or '未开启'
-        label(parent, 'asub_' .. key, ax + 4, aty + 29, aw - 8, 22, sub, on and 'accent_center' or 'quiet_center')
-    end
-
-    local gy = ay + 30 + th + 12
-    section(parent, 'gold', gy, '国库资金')
+    section(parent, 'gold', PAGE_Y, '国库资金')
     local ok_f, f = pcall(faction)
     local gold = (ok_f and f.treasury) and (group_digits(f:treasury()) .. ' 金') or '—'
-    label(parent, 'gold_val', CX, gy + 30, CW - 3 * 64 - 3 * 8, 36, gold, 'value')
+    label(parent, 'gold_val', CX, PAGE_Y + 30, CW - 3 * 64 - 3 * 8, 36, gold, 'value')
     for idx, item in ipairs({{10000, '+1万'}, {50000, '+5万'}, {200000, '+20万'}}) do
-        local b = button(parent, 'gold_' .. tostring(item[1]), CX + CW - (4 - idx) * 64 - (3 - idx) * 8, gy + 30, 64, 36, item[2], 'active')
+        local b = button(parent, 'gold_' .. tostring(item[1]), CX + CW - (4 - idx) * 64 - (3 - idx) * 8, PAGE_Y + 30, 64, 36, item[2], 'active')
         b:SetDisabled(busy)
     end
-
-    local ey = gy + 30 + 36 + 14
     local income_on, income_value = income_actions.read()
-    button(parent, 'income_open', CX + CW - 180, gy, 180, 24,
+    button(parent, 'income_open', CX + CW - 180, PAGE_Y, 180, 24,
         '收入增幅  ' .. (income_on and ('+' .. tostring(income_value) .. '%') or '未开启') .. '  ›',
         income_on and 'enabled' or 'active')
+    local ey = PAGE_Y + 30 + 36 + 14
     local resources = {}
     for index, def in ipairs(STRATEGIC.resources) do
         local resource = resource_interface(def)
@@ -1275,6 +1203,16 @@ local function draw_home(parent, act_list)
         end
         ey = ey + 72
     end
+    section(parent, 'quick', ey, '一键操作')
+    local bw = (CW - 2 * 8) / 3
+    for idx, item in ipairs({{'move_all', '补满全部军队'}, {'preset_campaign', #CAMPAIGN_PRESET .. ' 项内政与军队'},
+        {'preset_battle', #BATTLE_PRESET .. ' 项战斗加成'}}) do
+        local id, bx, by = item[1], CX + (idx - 1) * (bw + 8), ey + 30
+        button(parent, 'cmd_' .. id, bx, by, bw, 54, '', 'accent'):SetDisabled(busy)
+        label(parent, 'ptitle_' .. id, bx + 4, by + 6, bw - 8, 24, command_defs[id].short, 'center')
+        label(parent, 'psub_' .. id, bx + 4, by + 29, bw - 8, 20, item[2], 'accent_center')
+    end
+    ey = ey + 30 + 54 + 12
     section(parent, 'active', ey, '正在生效', tostring(#act_list) .. ' 项')
     local ry0 = ey + 30
     local slots = math.max(1, math.floor((CONTENT_BOTTOM - ry0 + 6) / 38))
@@ -1291,118 +1229,73 @@ local function draw_home(parent, act_list)
     end
 end
 
-local function draw_commands(parent)
-    local ok_f, f = pcall(faction)
-    local cqis = ok_f and collect_characters(f, false) or {}
-    local sel = selected_cqi
-        and ('已选中角色 #' .. tostring(selected_cqi) .. ' · 在役将领 ' .. tostring(#cqis) .. ' 名')
-        or ('未选中角色 · 在役将领 ' .. tostring(#cqis) .. ' 名')
-    card(parent, 'target_summary', CX, PAGE_Y, CW, 40, '', selected_cqi and 'accent' or 'active')
-    label(parent, 'target_info', CX + 14, PAGE_Y + 4, CW - 28, 18, sel, selected_cqi and 'accent' or 'muted')
-    label(parent, 'unit_target_info', CX + 14, PAGE_Y + 22, CW - 28, 16, target_actions and target_actions.summary() or '请先选中我方军队', 'hint')
-    local y, ordinal = PAGE_Y + 48, 0
-    for _, cmd in ipairs(COMMANDS) do
-        if not cmd.preset then ordinal = ordinal + 1 end
-        if not cmd.preset and math.ceil(ordinal / 5) == command_page then
-            local row = {def = cmd, is_cmd = true}
-            current_rows[#current_rows + 1] = row
-            local right = CX + CW - 12
-            if cmd.toggle then
-                card(parent, 'card_cmd_' .. cmd.id, CX, y, CW, ROW_TOGGLE_H, '', 'active')
-                label(parent, 'name_cmd_' .. cmd.id, CX + 14, y + 6, CW - 124, 24, cmd.short, 'active')
-                label(parent, 'info_cmd_' .. cmd.id, CX + 14, y + 30, CW - 124, 22, cmd.hint, 'hint')
-                local b = button(parent, 'cmd_' .. cmd.id, right - 88, y + 13, 88, 30, cmd.id == 'free_skills' and (target_actions.enabled() and '● 开' or '○ 关') or cmd.id == 'mortarchs' and (mortarch_actions and mortarch_actions.enabled() and '● 开' or '○ 关') or cmd.btn, 'accent')
-                b:SetDisabled(busy or (cmd.id == 'mortarchs' and (not mortarch_actions or not mortarch_actions.supported())))
-                if cmd.id == 'mortarch_buildings' then
-                    b:SetDisabled(busy or not mortarch_actions or not mortarch_actions.buildings_supported())
-                end
-                y = y + ROW_TOGGLE_H + ROW_GAP
-            else
-                card(parent, 'card_cmd_' .. cmd.id, CX, y, CW, ROW_NUMERIC_H, '', 'active')
-                local name_u = label(parent, 'name_cmd_' .. cmd.id, CX + 14, y + 6, CW * 0.55, 24, cmd.short, 'active')
-                local hx = CX + 14 + shrink_to_text(name_u) + 4
-                if right - hx >= 36 then
-                    label(parent, 'info_cmd_' .. cmd.id, hx, y + 6, right - hx, 24, cmd.hint, 'hint')
-                end
-                local ly = y + 34
-                button(parent, 'cminus_' .. cmd.id, CX + 14, ly, 30, 26, '−', 'active')
-                row.input = input(parent, 'cinput_' .. cmd.id, CX + 48, ly, 104, 26, cmd_draft[cmd.id])
-                button(parent, 'cplus_' .. cmd.id, CX + 156, ly, 30, 26, '+', 'active')
-                label(parent, 'unit_cmd_' .. cmd.id, CX + 192, ly, 40, 26, cmd.unit, 'quiet')
-                local b = button(parent, 'cmd_' .. cmd.id, right - 88, ly, 88, 26, cmd.btn, 'accent')
-                b:SetDisabled(busy)
-                y = y + ROW_NUMERIC_H + ROW_GAP
-            end
-        end
-    end
-    y = y + 6
-    section(parent, 'presets', y, '一键预设')
-    local bw = (CW - 8) / 2
-    for idx, item in ipairs({{'preset_campaign', #CAMPAIGN_PRESET}, {'preset_battle', #BATTLE_PRESET}}) do
-        local id, bx, by = item[1], CX + (idx - 1) * (bw + 8), y + 30
-        local b = button(parent, 'cmd_' .. id, bx, by, bw, 54, '', 'accent')
-        b:SetDisabled(busy)
-        label(parent, 'ptitle_' .. id, bx + 4, by + 6, bw - 8, 24, command_defs[id].short, 'center')
-        label(parent, 'psub_' .. id, bx + 4, by + 29, bw - 8, 20, tostring(item[2]) .. ' 项', 'accent_center')
-    end
-    button(parent, 'command_prev', CX, CONTENT_BOTTOM - 30, 80, 26, '上一页', 'active')
-    label(parent, 'command_page', CX + 84, CONTENT_BOTTOM - 30, CW - 168, 26, tostring(command_page) .. '/2 · 兵牌/技能在第2页', 'center')
-    button(parent, 'command_next', CX + CW - 80, CONTENT_BOTTOM - 30, 80, 26, '下一页', 'active')
-end
+local function row_height(def) return ROW_H + (def.presets and 32 or 0) end
 
-local function row_height(def) return def.toggle and ROW_TOGGLE_H or (ROW_NUMERIC_H + (def.presets and 32 or 0)) end
+-- Star, name and one line of detail; the controls sit to the right of them.
+local function row_head(parent, def, ry, width, lit, detail)
+    local starred = favourites[def.id]
+    button(parent, 'fav_' .. def.id, CX + 6, ry + 14, 26, 24, starred and '★' or '☆',
+        starred and (lit and 'star_lit' or 'star') or (lit and 'ghost_lit' or 'ghost_card'))
+    label(parent, 'name_' .. def.id, CX + 36, ry + 4, width, 24, def.short or def.label, 'active')
+    label(parent, 'info_' .. def.id, CX + 36, ry + 27, width, 20, detail, 'hint')
+end
 
 local function draw_row(parent, def, ry)
     local ok, active, actual = pcall(read, def)
-    local row = {def = def}
-    local rh = row_height(def)
-    card(parent, 'card_' .. def.id, CX, ry, ROW_W, rh, '', (ok and active) and 'enabled' or 'active')
     local lit = ok and active
-    local fav_state = favourites[def.id] and (lit and 'star_lit' or 'star') or (lit and 'ghost_lit' or 'ghost_card')
-    button(parent, 'fav_' .. def.id, CX + 6, ry + 6, 26, 24, favourites[def.id] and '★' or '☆', fav_state)
-    local nx, right = CX + 38, CX + ROW_W - 10
-    local switch_state = not ok and 'inactive' or active and 'enabled' or 'active'
-    local switch_text = not ok and '异常' or active and '● 开' or '○ 关'
+    local row = {def = def}
+    card(parent, 'card_' .. def.id, CX, ry, ROW_W, row_height(def), '', lit and 'enabled' or 'active')
+    local right = CX + ROW_W - 8
+    -- One switch: a changed value on a live row applies it, otherwise it flips.
+    local changed = lit and not def.toggle and tonumber(draft[def.id]) ~= actual
+    button(parent, 'toggle_' .. def.id, right - 56, ry + 13, 56, 26,
+        not ok and '异常' or changed and '应用' or lit and '● 开' or '○ 关',
+        not ok and 'inactive' or changed and 'accent' or lit and 'enabled' or 'active'):SetDisabled(not ok or busy)
     if def.toggle then
-        local tw = right - 72 - nx
-        label(parent, 'name_' .. def.id, nx, ry + 6, tw, 24, def.label, 'active')
-        label(parent, 'info_' .. def.id, nx, ry + 30, tw, 22, row_detail(def, ok, active, actual), 'hint')
-        local t = button(parent, 'toggle_' .. def.id, right - 64, ry + 13, 64, 30, switch_text, switch_state)
-        t:SetDisabled(not ok or busy)
+        row_head(parent, def, ry, ROW_W - 36 - 72, lit, row_detail(def, ok))
         return row
     end
-    local badge = (not ok and '异常') or (active and value_text(def, actual)) or nil
-    local badge_w = 0
-    if badge then
-        local b = label(parent, 'val_' .. def.id, right - 120, ry + 6, 120, 24, badge, ok and 'accent_right' or 'danger_right')
-        badge_w = shrink_right(b)
-    end
-    local name_u = label(parent, 'name_' .. def.id, nx, ry + 6, right - nx - badge_w - 8, 24, def.label, 'active')
-    local ix = nx + shrink_to_text(name_u) + 4
-    local iw = right - badge_w - 8 - ix
-    if iw >= 36 then
-        label(parent, 'info_' .. def.id, ix, ry + 6, iw, 24, row_detail(def, ok, active, actual), 'hint')
-    end
-    local ly = ry + 34
-    button(parent, 'minus_' .. def.id, nx, ly, 30, 26, '−', 'active')
+    row_head(parent, def, ry, ROW_W - 36 - 198, lit, row_detail(def, ok))
+    button(parent, 'minus_' .. def.id, right - 182, ry + 13, 26, 26, '−', 'active')
     if def.choices then
         local idx = tonumber(draft[def.id]) or def.default
-        button(parent, 'choice_' .. def.id, nx + 34, ly, 88, 26, tostring(def.choices[idx] or '?') .. def.unit, 'selected')
+        button(parent, 'choice_' .. def.id, right - 154, ry + 13, 64, 26, tostring(def.choices[idx] or '?') .. def.unit, 'selected')
     else
-        row.input = input(parent, 'input_' .. def.id, nx + 34, ly, 88, 26, draft[def.id])
+        row.input = input(parent, 'input_' .. def.id, right - 154, ry + 13, 64, 26, draft[def.id])
     end
-    button(parent, 'plus_' .. def.id, nx + 126, ly, 30, 26, '+', 'active')
-    local a = button(parent, 'apply_' .. def.id, right - 134, ly, 64, 26, '应用', 'active')
-    a:SetDisabled(not ok or busy)
-    local t = button(parent, 'toggle_' .. def.id, right - 64, ly, 64, 26, switch_text, switch_state)
-    t:SetDisabled(not ok or busy)
+    button(parent, 'plus_' .. def.id, right - 88, ry + 13, 26, 26, '+', 'active')
     if def.presets then
-        local pw = (right - nx - 18) / 4
+        local pw = (ROW_W - 36 - 8 - 18) / 4
         for i, v in ipairs(def.presets) do
-            button(parent, 'incomequick_' .. tostring(v), nx + (i - 1) * (pw + 6), ly + 30,
+            button(parent, 'incomequick_' .. tostring(v), CX + 36 + (i - 1) * (pw + 6), ry + 50,
                 pw, 26, '+' .. tostring(v) .. '%', 'active'):SetDisabled(not ok or busy)
         end
     end
+    return row
+end
+
+local function draw_command_row(parent, cmd, ry)
+    local row = {def = cmd, is_cmd = true}
+    card(parent, 'card_cmd_' .. cmd.id, CX, ry, ROW_W, ROW_H, '', 'active')
+    local right = CX + ROW_W - 8
+    local text, disabled = cmd.btn, busy
+    if cmd.id == 'free_skills' then
+        text = target_actions.enabled() and '● 开' or '○ 关'
+    elseif cmd.id == 'mortarchs' then
+        text = mortarch_actions.enabled() and '● 开' or '○ 关'
+        disabled = busy or not mortarch_actions.supported()
+    elseif cmd.id == 'mortarch_buildings' then
+        disabled = busy or not mortarch_actions.buildings_supported()
+    end
+    button(parent, 'cmd_' .. cmd.id, right - 56, ry + 13, 56, 26, text, 'accent'):SetDisabled(disabled)
+    if cmd.toggle then
+        row_head(parent, cmd, ry, ROW_W - 36 - 72, false, cmd.hint)
+        return row
+    end
+    row_head(parent, cmd, ry, ROW_W - 36 - 198, false, cmd.hint)
+    button(parent, 'cminus_' .. cmd.id, right - 182, ry + 13, 26, 26, '−', 'active')
+    row.input = input(parent, 'cinput_' .. cmd.id, right - 154, ry + 13, 64, 26, cmd_draft[cmd.id])
+    button(parent, 'cplus_' .. cmd.id, right - 88, ry + 13, 26, 26, '+', 'active')
     return row
 end
 
@@ -1420,7 +1313,8 @@ end
 -- content and handles the wheel and the slider; the panel only fills it. It
 -- survives renders while its key is unchanged, which keeps the scroll position,
 -- and a row is rebuilt only when its signature changes, so a click on one row
--- does not recreate the whole of a long list.
+-- does not recreate the whole of a long list. Its slider has a constant step:
+-- by default a wheel notch moves one child, and all rows share a single child.
 local function close_list()
     if list_ui then list_ui.view:Destroy(); list_ui = nil end
 end
@@ -1452,6 +1346,7 @@ local function open_list(key, content_h)
         local _, arrow_h = (arrow or slider):Dimensions()
         local slider_w = slider:Dimensions()
         fit_part(slider, slider_w, h - 2 * (arrow and arrow_h or px(24)))
+        pcall(function() slider:SetProperty('step_size', tostring(px(ROW_H + ROW_GAP))) end)
     end
     local content = make(box, 'list_content', 'ui/wh3pt/label', nil, ox + x0, oy + y0, row_w, px(content_h), '', 'active')
     if box.Layout then pcall(function() box:Layout() end) end
@@ -1483,18 +1378,32 @@ local function in_list(fn)
 end
 
 local function draw_catalog()
-    local matches, ids, total = {}, {}, 0
-    for _, def in ipairs(CATALOG) do
-        if (group == '全部' or def.group == group or (group == '收藏' and favourites[def.id]))
-            and (query == '' or literal_find(def.label, query, 1, true) or literal_find(def.id, query, 1, true)) then
-            matches[#matches + 1] = def
-            ids[#ids + 1] = def.id
-            total = total + row_height(def) + ROW_GAP
+    local entries, ids, total = {}, {}, 0
+    for _, page in ipairs(PAGES) do
+        for index, block in ipairs((group == '全部' or group == page.name) and page.sections or {}) do
+            local title = {title=(group == '全部' and (page.name .. ' · ') or '') .. block[1], id=page.name .. index}
+            for i = 2, #block do
+                local def = definitions[block[i]] or command_defs[block[i]]
+                local mortarch = def.id == 'mortarchs' or def.id == 'mortarch_buildings'
+                if (not mortarch or (mortarch_actions and mortarch_actions.supported()))
+                    and (group ~= '全部' or not only_favourites or favourites[def.id])
+                    and (query == '' or literal_find(def.short or def.label, query, 1, true) or literal_find(def.id, query, 1, true)) then
+                    if title then
+                        entries[#entries + 1] = title
+                        ids[#ids + 1] = title.id
+                        total = total + SECTION_H
+                        title = nil
+                    end
+                    entries[#entries + 1] = def
+                    ids[#ids + 1] = def.id
+                    total = total + row_height(def) + ROW_GAP
+                end
+            end
         end
     end
-    if #matches == 0 then
+    if #entries == 0 then
         close_list()
-        if group == '收藏' and query == '' then
+        if only_favourites and query == '' then
             draw_empty_state(rows_parent, '收藏夹还是空的', '在列表中点 ☆ 即可收藏常用功能', 'go_all', '浏览全部功能')
         else
             draw_empty_state(rows_parent, '未找到 “' .. (query ~= '' and query or '条件') .. '”',
@@ -1505,14 +1414,33 @@ local function draw_catalog()
     open_list(table.concat(ids, ','), total - ROW_GAP)
     in_list(function()
         local y = LIST_Y
-        for _, def in ipairs(matches) do
-            local ok, active, actual = pcall(read, def)
-            local signature = table.concat({tostring(ok), tostring(active), tostring(actual),
-                tostring(favourites[def.id]), tostring(draft[def.id]), tostring(busy)}, '|')
-            current_rows[#current_rows + 1] = list_row(def.id, y, row_height(def), signature, function(holder)
-                return draw_row(holder, def, y)
-            end)
-            y = y + row_height(def) + ROW_GAP
+        for _, entry in ipairs(entries) do
+            if entry.title then
+                local top = y
+                list_row('section_' .. entry.id, y, SECTION_H, entry.title, function(holder)
+                    label(holder, 'sec_' .. entry.id, CX, top + 4, ROW_W, 20, entry.title, 'section')
+                    card(holder, 'div_' .. entry.id, CX, top + 25, ROW_W, 1, '', 'divider')
+                end)
+                y = y + SECTION_H
+            else
+                local top, def = y, entry
+                local signature, draw
+                if command_defs[def.id] then
+                    signature = table.concat({tostring(cmd_draft[def.id]), tostring(favourites[def.id]), tostring(busy),
+                        tostring(def.id == 'free_skills' and target_actions.enabled()),
+                        tostring(def.id == 'mortarchs' and mortarch_actions.enabled())}, '|')
+                    draw = draw_command_row
+                else
+                    local ok, active, actual = pcall(read, def)
+                    signature = table.concat({tostring(ok), tostring(active), tostring(actual),
+                        tostring(favourites[def.id]), tostring(draft[def.id]), tostring(busy)}, '|')
+                    draw = draw_row
+                end
+                current_rows[#current_rows + 1] = list_row(def.id, y, row_height(def), signature, function(holder)
+                    return draw(holder, def, top)
+                end)
+                y = y + row_height(def) + ROW_GAP
+            end
         end
     end)
 end
@@ -1639,31 +1567,27 @@ render = function()
         refit(launcher, visible and '◆ 修改器 [F9]' or ('◆ 修改器 · ' .. tostring(total)),
             visible and 'selected' or (total > 0 and 'enabled' or 'active'))
     end
-    for _, item in ipairs(RAIL_ITEMS) do
+    for _, item in ipairs(PAGES) do
         local tab_btn = controls[PREFIX .. 'tab_' .. item.name]
         if tab_btn then refit(tab_btn, item.name, (not collapsed and group == item.name) and 'selected' or 'ghost') end
     end
     if collapsed then return end
-    if title_ui then refit(title_ui, active_sheet and '正在生效' or (PAGE_TITLES[group] or group)) end
-    if preset_ui then refit(preset_ui, preset_open and '预设 ▲' or '预设 ▼', preset_open and 'selected' or 'active') end
+    if title_ui then refit(title_ui, active_sheet and '正在生效' or PAGES[group].title) end
 
     -- rows_parent holds what stays put; the scroll list is its sibling, below it.
-    local list_page = active_sheet or (group ~= '常用' and group ~= '指令' and group ~= '精英')
+    local list_page = active_sheet or (group ~= '总览' and group ~= '精英')
     rows_parent = label(panel, 'rows', CX, 56, CW, FOOTER_Y - 4 - 56, '')
     if not list_page then close_list() end
     if active_sheet then
         draw_active_sheet(act_list)
-    elseif group == '常用' then
+    elseif group == '总览' then
         draw_home(rows_parent, act_list)
-    elseif group == '指令' then
-        draw_commands(rows_parent)
     elseif group == '精英' then
         draw_strategic(rows_parent)
     else
-        draw_search(rows_parent)
+        draw_strip(rows_parent)
         draw_catalog()
     end
-    if preset_open then draw_preset_menu() end
 end
 
 -- The launcher sits in the free stretch of the top bar, left of the native tab
@@ -1714,7 +1638,7 @@ create_ui = function()
     if panel then left_home(panel, 'panel'); capture(); panel:Destroy() end
     if launcher then left_home(launcher, 'launcher'); launcher:Destroy() end
     panel, launcher, rows_parent, overlay_parent, title_ui, rail_count_ui = nil, nil, nil, nil, nil, nil
-    search, status_ui, status_dot_ui, preset_ui, list_ui = nil, nil, nil, nil, nil
+    search, status_ui, status_dot_ui, list_ui = nil, nil, nil, nil
     current_rows, controls, strategic_inputs = {}, {}, {}
     local rw, rh = compute_scale(root)
     local panel_h = collapsed and RAIL_H or DESIGN_H
@@ -1733,7 +1657,7 @@ create_ui = function()
     local inner_h = panel_h - 2 * FRAME_INSET
     card(panel, 'rail_bg', FRAME_INSET, FRAME_INSET, RAIL_W - FRAME_INSET * (collapsed and 2 or 1), inner_h, '', 'rail_bg')
     card(panel, 'logo_box', (RAIL_W - 34) / 2, 10, 34, 34, '◆', 'logo')
-    for i, item in ipairs(RAIL_ITEMS) do
+    for i, item in ipairs(PAGES) do
         button(panel, 'tab_' .. item.name, 8, 56 + (i - 1) * 36, RAIL_W - 16, 32, item.name,
             (not collapsed and group == item.name) and 'selected' or 'ghost')
     end
@@ -1746,9 +1670,8 @@ create_ui = function()
         button(panel, 'clear', 8, FOOTER_Y - 30, RAIL_W - 16, 30, '全关', 'danger')
         rail_count_ui = button(panel, 'rail_count', 8, FOOTER_Y + 8, RAIL_W - 16, 30, '0 项', 'active')
         card(panel, 'rail_div', RAIL_W, FRAME_INSET, 1, inner_h, '', 'divider')
-        -- Header: page title + presets / scale / collapse / close.
-        title_ui = label(panel, 'title', CX, 12, CW - 232, 30, PAGE_TITLES[group] or group, 'title')
-        preset_ui = button(panel, 'preset_menu', CX + CW - 224, 13, 72, 28, '预设 ▼', 'active')
+        -- Header: page title + scale / collapse / close.
+        title_ui = label(panel, 'title', CX, 12, CW - 156, 30, PAGES[group].title, 'title')
         button(panel, 'ui_scale', CX + CW - 146, 13, 76, 28, scale_label(), 'ghost_page')
         button(panel, 'collapse', CX + CW - 64, 13, 30, 28, '—', 'active')
         button(panel, 'close', CX + CW - 30, 13, 30, 28, '×', 'active')
@@ -1774,7 +1697,7 @@ local function click(id)
     end
     if id == 'open' then
         visible = not visible
-        preset_open, active_sheet = false, false
+        active_sheet = false
         if visible then create_ui() else
             if panel then panel:SetVisible(false) end
             if launcher then refit(launcher, '◆ 修改器 [F9]', 'active') end
@@ -1783,14 +1706,14 @@ local function click(id)
     elseif id == 'close' then
         capture()
         visible = false
-        preset_open, active_sheet = false, false
+        active_sheet = false
         if panel then panel:SetVisible(false) end
         if launcher then refit(launcher, '◆ 修改器 [F9]', 'active') end
         return
     elseif id == 'collapse' or id == 'collapse_rail' then
         capture()
         collapsed = not collapsed
-        preset_open, active_sheet = false, false
+        active_sheet = false
         create_ui()
         return
     elseif id == 'ui_scale' then
@@ -1801,7 +1724,6 @@ local function click(id)
         end
         ui_scale_pref = UI_SCALE_STEPS[nxt]
         cm:set_saved_value(PREFIX .. 'ui_scale', ui_scale_pref)
-        preset_open = false
         create_ui()
         message(ui_scale_pref > 0 and ('界面缩放：' .. tostring(math.floor(ui_scale_pref * 100 + 0.5)) .. '%')
             or ('界面缩放：自动（检测 ' .. tostring(math.floor((ui_info.auto or 1) * 100 + 0.5)) .. '%）'))
@@ -1811,51 +1733,29 @@ local function click(id)
         if collapsed then
             collapsed = false
             active_sheet = true
-            preset_open = false
             create_ui()
             return
         end
         active_sheet = id == 'sheet_open' or not active_sheet
-        preset_open = false
     elseif id == 'sheet_close' then
         active_sheet = false
-    elseif id == 'preset_menu' then
-        category_menu = false
-        preset_open = not preset_open
+    elseif id == 'favourites_only' then
+        capture()
+        only_favourites = not only_favourites
     elseif id == 'go_all' then
         capture()
-        group, query, search_text, active_sheet, preset_open = '全部', '', '', false, false
+        group, query, search_text, active_sheet, only_favourites = '全部', '', '', false, false
         if search then search:SetStateText('') end
         if collapsed then collapsed = false; create_ui(); return end
     elseif id == 'search_go' then
         strategic_page, category_menu = 1, false
         if search then search_text = search:GetStateText(); query = search_text end
-        preset_open, active_sheet = false, false
+        active_sheet = false
     elseif id == 'search_clear' or id == 'empty_clear' then
         strategic_page, category_menu = 1, false
-        query, search_text = '', ''
+        query, search_text, only_favourites = '', '', false
         if search then search:SetStateText('') end
-        preset_open = false
-    elseif id == 'refresh' then
-        preset_open = false
-        message('部队项显示手动战斗设置；战役项读取当前效果包')
-    elseif id == 'command_prev' or id == 'command_next' then
-        command_page = 3 - command_page
     elseif id == 'clear' then clear_all(); return
-    elseif id == 'preset_campaign' then
-        preset_open = false
-        run_command_action('preset_campaign'); return
-    elseif id == 'preset_battle' then
-        preset_open = false
-        run_command_action('preset_battle'); return
-    elseif id == 'quick_move' then
-        preset_open = false
-        run_command_action('move_all'); return
-    elseif id == 'lock_all' then toggle_all_locks(); return
-    elseif substring(id, 1, 5) == 'lock_' then
-        local key = substring(id, 6)
-        local def = definitions[key]
-        if def then apply(key, not read(def), tostring(def.default)); return end
     elseif substring(id, 1, 5) == 'gold_' then
         local amount = substring(id, 6)
         run_command_action('treasury', amount)
@@ -1865,6 +1765,10 @@ local function click(id)
         if definitions[key] then apply(key, false, draft[key]); return end
     elseif id == 'native_toggle' then
         set_native_recruitment(not native_enabled)
+    elseif substring(id, 1, 10) == 'elite_tab_' then
+        elite_tabs.select(substring(id, 11))
+        arrange_native_cards()
+        return
     elseif id == 'resource_prev' or id == 'resource_next' then
         capture(); home_resource_page = math.max(1, home_resource_page + (id == 'resource_next' and 1 or -1))
     elseif substring(id, 1, 12) == 'resource_do_' then
@@ -1881,7 +1785,7 @@ local function click(id)
         capture(); strategic_sort = strategic_sort == 'recruitment_cost' and 'upkeep_cost' or strategic_sort == 'upkeep_cost' and 'category' or 'recruitment_cost'
         strategic_page, category_menu = 1, false
     elseif id == 'strategy_categories' then
-        capture(); category_menu = not category_menu; preset_open = false
+        capture(); category_menu = not category_menu
     elseif substring(id, 1, 12) == 'strategycat_' then
         capture(); strategic_category = substring(id, 13)
         strategic_page, category_menu = 1, false
@@ -1891,8 +1795,8 @@ local function click(id)
         select_native_regiment(index)
         return
     elseif id == 'income_open' then
-        capture(); group = '战役'; query, search_text = '收入', '收入'
-        preset_open, active_sheet = false, false
+        capture(); group = '内政'; query, search_text = '', ''
+        active_sheet = false
     elseif substring(id, 1, 12) == 'incomequick_' then
         capture(); apply('income', true, substring(id, 13)); return
     elseif substring(id, 1, 4) == 'tab_' then
@@ -1900,9 +1804,9 @@ local function click(id)
         group = substring(id, 5)
         strategic_page = 1
         category_menu = false
-        query, search_text = '', ''
+        query, search_text, only_favourites = '', '', false
         if search then search:SetStateText('') end
-        preset_open, active_sheet = false, false
+        active_sheet = false
         if collapsed then collapsed = false; create_ui(); return end
     elseif substring(id, 1, 4) == 'cmd_' then
         capture()
@@ -1924,20 +1828,26 @@ local function click(id)
     else
         local action, key = string.match(id, '^([^_]+)_(.+)$')
         local def = definitions[key]
-        if not def then return end
-        capture()
-        if action == 'fav' then
+        if action == 'fav' and (def or command_defs[key]) then
+            capture()
             favourites[key] = not favourites[key]
             cm:set_saved_value(setting(key, 'favourite'), favourites[key])
+        elseif not def then
+            return
         elseif action == 'plus' or action == 'minus' or action == 'choice' then
+            capture()
             local n = validate(def, draft[key])
             local low = def.min or (def.choices and 1 or 0)
             n = math.max(low, math.min(def.max, n + (action == 'minus' and -def.step or def.step)))
             if action == 'choice' and n == tonumber(draft[key]) then n = 1 end
             draft[key] = tostring(n)
             for _, row in ipairs(current_rows) do if row.def.id == key and row.input then row.input:SetStateText(draft[key]) end end
-        elseif action == 'apply' then apply(key, true, draft[key]); return
-        elseif action == 'toggle' then apply(key, not read(def), draft[key]); return
+        elseif action == 'toggle' then
+            capture()
+            local on, actual = read(def)
+            if on and not def.toggle and tonumber(draft[key]) ~= actual then apply(key, true, draft[key])
+            else apply(key, not on, draft[key]) end
+            return
         end
     end
     render()
@@ -1952,7 +1862,6 @@ end
 
 reset_player_context = function()
     player_epoch = player_epoch + 1
-    command_page = 1
     manual_battle.migrate()
     income_actions.migrate()
     if target_actions then target_actions.reset() end
@@ -1962,7 +1871,7 @@ reset_player_context = function()
     query, search_text, search = '', '', nil
     strategic_page, home_resource_page, own_regiments = 1, 1, true
     strategic_category, category_menu = 'all', false
-    preset_open, active_sheet = false, false
+    active_sheet, only_favourites = false, false
     close_list()
     for _, def in ipairs(CATALOG) do
         definitions[def.id] = def
@@ -1974,6 +1883,7 @@ reset_player_context = function()
     for _, cmd in ipairs(COMMANDS) do
         command_defs[cmd.id] = cmd
         cmd_draft[cmd.id] = tostring(cmd.default)
+        favourites[cmd.id] = cm:get_saved_value(setting(cmd.id, 'favourite')) == true
     end
     for index, def in ipairs(STRATEGIC.resources) do
         strategic_draft['resource_' .. index] = cm:get_saved_value(setting('resource_' .. def.id, 'target'))
@@ -2103,9 +2013,10 @@ return {
     targets=function() return target_actions end,
     start=start, read=read, apply=apply, clear=clear_all, validate=validate,
     strategic=STRATEGIC, set_resource=set_resource, native_toggle=set_native_recruitment,
-    native_select=select_native_regiment, native_sync=schedule_native_sync, native_filter=mark_native_unlocked_cards,
+    native_select=select_native_regiment, native_sync=schedule_native_sync, native_filter=arrange_native_cards,
+    elite_tabs=function() return elite_tabs end,
     regiment_belongs=regiment_belongs_to_faction, resource_interface=resource_interface,
-    click=click, command=run_command_action, catalog=CATALOG, commands=COMMANDS,
+    click=click, command=run_command_action, catalog=CATALOG, commands=COMMANDS, pages=PAGES,
     layout=function() return {scale=S, text_scale=TS, auto=ui_info.auto, clamped=ui_info.clamped,
         probe_w=ui_info.probe_w, res_w=ui_info.res_w, root_w=ui_info.root_w} end,
 }

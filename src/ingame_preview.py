@@ -27,9 +27,9 @@ SETUP_EFFECTS = [
     ('attack', '35'), ('order', '50'), ('growth', '500'),
 ]
 VIEWS = [
-    ('常用', '常用'), ('指令', '选中与指令'), ('战役', '战役加成'),
-    ('部队', '部队属性'), ('特殊', '特殊能力'), ('收藏', '收藏夹'),
-    ('preset', '全部 + 预设菜单'), ('sheet', '正在生效清单'), ('collapsed', '收起为侧栏'),
+    ('总览', '总览'), ('内政', '内政与经济'), ('军队', '军队与将领'),
+    ('战斗', '手动战斗加成'), ('精英', '精英部队招募'), ('全部', '全部功能'),
+    ('sheet', '正在生效清单'), ('collapsed', '收起为侧栏'),
 ]
 NATIVE_INPUT = dict(fill=(14, 40, 51), line=(120, 76, 45), keyline=(6, 18, 24), text=(255, 248, 215))
 
@@ -105,9 +105,6 @@ def snapshot(lua_code, templates, view, env, effects=True, bundle_keys=()):
         api.click('collapse')
     elif view == 'sheet':
         api.click('rail_count')
-    elif view == 'preset':
-        api.click('tab_全部')
-        api.click('preset_menu')
     elif view != 'closed':
         api.click('tab_' + view)
     panel = g.widgets['wh3pt_panel']
@@ -305,10 +302,12 @@ def render_view(payload, view, env=SCREEN_4K, background=None, offset=None, marg
     phys = env['phys']
     if background is None:
         px, py, pw, ph = rect
-        lx0 = min(it['x'] for it in items)
-        ly0 = min(it['y'] for it in items)
-        lx1 = max(it['x'] + it['w'] for it in items)
-        ly1 = max(it['y'] + it['h'] for it in items)
+        # List content scrolls past the panel but only its clipped part is drawn.
+        shown = [it for it in items if not it['clip']]
+        lx0 = min(it['x'] for it in shown)
+        ly0 = min(it['y'] for it in shown)
+        lx1 = max(it['x'] + it['w'] for it in shown)
+        ly1 = max(it['y'] + it['h'] for it in shown)
         size = (int((lx1 - lx0) * phys) + 2 * margin, int((ly1 - ly0) * phys) + 2 * margin)
         background = Image.new('RGBA', size, (30, 33, 38, 255))
         offset = (margin - lx0 * phys, margin - ly0 * phys)

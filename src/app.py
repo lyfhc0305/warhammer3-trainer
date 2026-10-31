@@ -40,7 +40,7 @@ LABELS = {
     'resurrection': ('允许回血复活模型', '需同时开启持续回血；是否能复活取决于单位与游戏规则。'),
     'ammunition': ('持续补充弹药', '每队己方部队每秒仅补充自身弹药；不向其它部队传播。'),
     'reload': ('装填属性加成', '保留旧能力的 stat_reloading 加成。'),
-    'vigour': ('完美活力', '仅玩家战役势力。'),
+    'vigour': ('完美活力', '仅玩家战役势力；静态包不清除开局疲劳，内置面板可以。'),
     'unbreakable': ('不溃', '仅玩家战役势力。'),
     'vanguard': ('先锋部署', '仅玩家战役势力；仍受地图与单位规则限制。'),
     'attrition': ('免疫战役损耗', '仅玩家战役势力。'),
@@ -51,44 +51,51 @@ LABELS = {
 
 # key -> (value attribute, maximum, unit, minimum)
 BASIC_NUMERIC = {
-    'regeneration': ('heal', 100, '% / 秒', 0.01),
-    'ammunition': ('ammo_percent', 100, '% / 秒', 0),
-    'reload': ('reload_value', 500, '效果值', 0),
-    'foreign_replenishment': ('foreign_value', 500, '效果值', 0),
+    'regeneration': ('heal', 100, '%/秒', 0.01),
+    'ammunition': ('ammo_percent', 100, '%/秒', 0),
+    'reload': ('reload_value', 500, '%', 0),
+    'foreign_replenishment': ('foreign_value', 500, '%', 0),
     'cap': ('cap_value', 100000000, '倍', 0),
 }
 
+# Same structure as the in-game panel: features sit where they act.
 BASIC_SECTIONS = [
-    ('basic_battle', '战斗增益', ['regeneration', 'resurrection', 'ammunition', 'reload', 'vigour', 'unbreakable', 'vanguard', 'cap']),
-    ('basic_campaign', '战役增益', ['attrition', 'foreign_replenishment', 'replenishment_cap']),
-    ('basic_mods', 'Mod 整合', ['building', 'ai']),
+    ('battle_basic', '恢复与特性', ['regeneration', 'resurrection', 'ammunition', 'reload', 'vigour', 'unbreakable', 'vanguard', 'cap']),
+    ('army_basic', '行军与补员', ['attrition', 'foreign_replenishment', 'replenishment_cap']),
+    ('mods_basic', '模组整合', ['building', 'ai']),
 ]
+BASIC_GROUP = {key: section.split('_')[0] for section, _, keys in BASIC_SECTIONS for key in keys}
 
 GROUPS = {
-    'campaign': ('战役加成', '势力级战役数值：秩序、移动、外交、招募、维护费等'),
-    'units': ('部队属性', '战斗属性：特保、远抗、攻防、伤害、护甲、弹药等'),
-    'special': ('回血与特殊', '旧版复合预设与特殊效果包'),
-    'basic': ('基础功能', '回血、补弹、活力、不溃等常用开关'),
+    'domestic': ('内政', '秩序、外交、维护费，以及发展、建筑、科技加速'),
+    'army': ('军队', '移动距离、招募格子、补员、损耗与间谍'),
+    'battle': ('战斗', '回血与特性、部队属性、复合预设'),
+    'mods': ('Mod 整合', '建筑快捷菜单、AI 托管，以及神器和弹道效果包'),
     'favs': ('收藏', '点击每行末尾的 ☆ 即可收藏常用项'),
 }
-CATEGORY_TO_GROUP = {'战役加成': 'campaign', '部队属性': 'units', '回血与特殊': 'special'}
+ATTRIBUTE_GROUP = {key: 'battle' if spec[3] == '部队属性' else
+                   'domestic' if key in ('order', 'diplomacy', 'upkeep') else 'army'
+                   for key, spec in ATTRIBUTES.items()}
 
 SECTION_ORDER = [
-    ('campaign_attr', 'campaign', '数值属性'),
-    ('campaign_mod', 'campaign', '效果包'),
-    ('units_attr', 'units', '数值属性'),
-    ('units_mod', 'units', '效果包'),
-    ('special_attr', 'special', '数值属性'),
-    ('special_mod', 'special', '效果包'),
-] + [(key, 'basic', title) for key, title, _ in BASIC_SECTIONS]
+    ('domestic_attr', 'domestic', '数值加成'),
+    ('domestic_mod', 'domestic', '效果包'),
+    ('army_attr', 'army', '数值加成'),
+    ('army_basic', 'army', '行军与补员'),
+    ('battle_basic', 'battle', '恢复与特性'),
+    ('battle_attr', 'battle', '部队属性'),
+    ('battle_mod', 'battle', '效果包与复合预设'),
+    ('mods_basic', 'mods', '模组整合'),
+    ('mods_mod', 'mods', '其他效果包'),
+]
 
 NAV = [
     ('游戏内面板', [('home', 'game', '安装与启动')]),
     ('静态配置包', [
-        ('campaign', 'globe', '战役加成'),
-        ('units', 'shield', '部队属性'),
-        ('special', 'health', '回血与特殊'),
-        ('basic', 'tune', '基础功能'),
+        ('domestic', 'globe', '内政'),
+        ('army', 'shield', '军队'),
+        ('battle', 'flash', '战斗'),
+        ('mods', 'package', 'Mod 整合'),
         ('favs', 'star', '收藏'),
         ('active', 'check', '已启用'),
     ]),
@@ -424,7 +431,7 @@ class App(tk.Tk):
         self.saved_local = []
         self.status = tk.StringVar(value='准备就绪')
         self.current_page = None
-        self.current_group = 'campaign'
+        self.current_group = 'domestic'
         self._empty_state = None
         self._install_kind = 'info'
         self._scanned_dirs = None
@@ -590,7 +597,7 @@ class App(tk.Tk):
         self.preset_menu = tk.Menu(self, tearoff=0, bg=THEME['card'], fg=THEME['ink'], bd=0,
                                    activebackground=THEME['gold_dim'], activeforeground=THEME['gold_ink'],
                                    font=ui.font(self, 'body'))
-        self.preset_menu.add_command(label='  战役发育预设  ·  秩序 / 移速 / 外交 / 招募 / 维护费', command=self.apply_campaign_preset)
+        self.preset_menu.add_command(label='  战役发育预设  ·  秩序 / 移动 / 外交 / 招募 / 维护费', command=self.apply_campaign_preset)
         self.preset_menu.add_command(label='  精锐战斗预设  ·  特保 / 远抗 / 攻防 / 伤害 / 不溃', command=self.apply_battle_preset)
         self.preset_menu.add_separator()
         self.preset_menu.add_command(label='  全部关闭', command=self.clear)
@@ -615,7 +622,7 @@ class App(tk.Tk):
                     kw = dict(value=getattr(self, attr), maximum=maximum, unit=unit, minimum=minimum)
                 row = FeatureRow(section.list, label_text, hint, self.options[key], self._row_changed,
                                  fav_var=self._fav_var('basic_' + key), on_fav=self._on_fav_changed,
-                                 item_id='basic_' + key, group='basic', **kw)
+                                 item_id='basic_' + key, group=BASIC_GROUP[key], **kw)
                 section.rows.append(row)
 
     # ----------------------------------------------------------------- active
@@ -779,7 +786,7 @@ class App(tk.Tk):
         if visible == 0:
             if group == 'favs' and not query:
                 self._empty_state = ui.empty_state(self.catalog_body, '收藏夹还是空的', '点击任意功能行末尾的 ☆ 即可加入收藏',
-                                                   '浏览战役加成', lambda: self.show_group('campaign'), icon='star')
+                                                   '浏览内政', lambda: self.show_group('domestic'), icon='star')
             else:
                 self._empty_state = ui.empty_state(self.catalog_body, f'未找到 “{raw}”',
                                                    '换个关键词试试，或清除搜索查看全部功能',
@@ -851,7 +858,7 @@ class App(tk.Tk):
 
     @staticmethod
     def _local_group(name):
-        return 'campaign' if '战役' in name else 'units' if '部队' in name else 'special'
+        return 'domestic' if '战役' in name else 'battle' if '部队' in name or '回血' in name else 'mods'
 
     def _collect_active_items(self):
         items = []
@@ -862,13 +869,13 @@ class App(tk.Tk):
                     v_txt = f'{getattr(self, attr).get()} {unit}'
                 else:
                     v_txt = '开启'
-                items.append(dict(id='opt_' + key, label=LABELS[key][0], value_text=v_txt, group='basic',
+                items.append(dict(id='opt_' + key, label=LABELS[key][0], value_text=v_txt, group=BASIC_GROUP[key],
                                   disable=lambda v=var: (v.set(False), self.update_count())))
         for key, (enabled, value) in self.attribute_options.items():
             if enabled.get():
-                label_text, _, _, category, _, _, unit = ATTRIBUTES[key]
+                label_text, _, _, _, _, _, unit = ATTRIBUTES[key]
                 items.append(dict(id='attr_' + key, label=label_text, value_text=f'{value.get()} {unit}',
-                                  group=CATEGORY_TO_GROUP.get(category, 'campaign'),
+                                  group=ATTRIBUTE_GROUP[key],
                                   disable=lambda e=enabled: (e.set(False), self.update_count())))
         for name, var in self.local_options.items():
             if var.get():
@@ -885,7 +892,7 @@ class App(tk.Tk):
         self.active_sub.set_text(f'{len(items)} 项将写入静态包' if items else '尚未启用任何静态包功能')
         if not items:
             ui.empty_state(body, '当前没有启用的功能', '在左侧分类中打开开关，启用的项目会汇总在这里',
-                           '浏览战役加成', lambda: self.show_group('campaign'), icon='check').pack(fill='x')
+                           '浏览内政', lambda: self.show_group('domestic'), icon='check').pack(fill='x')
             return
         box = tk.Frame(body, bg=THEME['card'], highlightthickness=1, highlightbackground=THEME['border'])
         box.pack(fill='x', pady=(0, px(24)))
@@ -905,7 +912,7 @@ class App(tk.Tk):
         counts = {g: 0 for g in GROUPS}
         for item in self._collect_active_items():
             counts[item['group']] += 1
-        for group in ('campaign', 'units', 'special', 'basic'):
+        for group in ('domestic', 'army', 'battle', 'mods'):
             self.nav[group].set_count(counts[group], gold=True)
         self.nav['favs'].set_count(sum(1 for v in self.favourites.values() if v.get()))
         total = sum(counts.values())
@@ -979,8 +986,8 @@ class App(tk.Tk):
                     enabled.set(True)
                     value.set(f'{next(iter(values)):g}' if len(values) == 1 else '请选择数值')
             for key, spec in ATTRIBUTES.items():
-                label_text, _, _, category, maximum, _, unit = spec
-                group = CATEGORY_TO_GROUP[category]
+                label_text, _, _, _, maximum, _, unit = spec
+                group = ATTRIBUTE_GROUP[key]
                 enabled, value = self.attribute_options[key]
                 section = self.sections[group + '_attr']
                 section.rows.append(FeatureRow(

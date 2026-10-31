@@ -1,7 +1,6 @@
 from pathlib import Path
 import unittest
 from lupa.lua51 import LuaRuntime
-from build_ingame import battle_spell_keys
 from pack_io import read_pack
 from trainer_core import GAME
 
@@ -18,7 +17,10 @@ class BattleTests(unittest.TestCase):
             end
             function make_unit(id, player, abilities)
                 local u={id=id, player=player, abilities=abilities or {}, men=50, hp=.5,
-                    ammo=0, initial=100, deployed=true, disabled={}, calls=0}
+                    ammo=0, initial=100, deployed=true, disabled={}, calls=0,
+                    fatigue='threshold_fresh', attributes={}}
+                function u:fatigue_state() return self.fatigue end
+                function u:set_stat_attribute(key,on) self.attributes[key]=on end
                 function u:unique_ui_id() return self.id end
                 function u:is_player_controlled() return self.player end
                 function u:owned_non_passive_special_abilities() return self.spells or {} end
@@ -62,15 +64,30 @@ class BattleTests(unittest.TestCase):
                     if not self.reject then self.reserve=self.reserve+n end
                 end
                 function a:create_unit_controller()
-                    local uc={resets={},releases=0}
+                    local uc={resets={},refills={},releases=0,fatigue_calls=0}
                     function uc:add_units(u) assert(u.player);self.unit=u end
                     function uc:clear_all() self.unit=nil end
+                    function uc:change_fatigue_amount(amount)
+                        assert(amount>0 and amount<1)  -- 0 is a divide by zero in the engine
+                        self.unit.script_control=true
+                        self.fatigue_calls=self.fatigue_calls+1
+                        if self.unit.reject_fatigue then error('fatigue API failure') end
+                        -- frozen: perfect vigour blocks the call. stuck: nothing helps.
+                        if self.unit.stuck then return end
+                        if self.unit.frozen and self.unit.attributes.fatigue_immune~=false then return end
+                        self.unit.fatigue='threshold_fresh'
+                    end
                     function uc:reset_ability_cooldown(key)
                         self.unit.script_control=true
                         if self.unit.reject_reset then error('cooldown API failure') end
                         self.resets[#self.resets+1]=key
                         self.unit.cooldowns=self.unit.cooldowns or {}
                         self.unit.cooldowns[key]=0
+                    end
+                    function uc:reset_ability_number_of_uses(key)
+                        self.refills[#self.refills+1]=key
+                        self.unit.uses=self.unit.uses or {}
+                        self.unit.uses[key]=true
                     end
                     function uc:release_control()
                         self.releases=self.releases+1
@@ -90,6 +107,7 @@ class BattleTests(unittest.TestCase):
             bm={}
             function bm:is_multiplayer() return multiplayer end
             function bm:is_replay() return replay==true end
+            function bm:is_conflict_phase() return conflict~=false end
             function bm:get_player_alliance()
                 return {armies=function() return collection(battle_armies) end}
             end
@@ -103,9 +121,7 @@ class BattleTests(unittest.TestCase):
         module = self.lua.execute((SRC / 'ingame/battle.lua').read_text(encoding='utf-8'))
         self.g = self.lua.globals()
         self.module = module
-        self.spells = battle_spell_keys()
-        self.g.SPELL_KEYS = self.lua.table_from(self.spells)  # same catalog injected by pack builder
-        self.api = module.new(self.g.bm,self.lua.table_from(self.spells))
+        self.api = module.new(self.g.bm)
 
     def publish_campaign_magic(self, owner='player'):
         self.g.svr.wh3pt_magic_pending = True
@@ -123,7 +139,7 @@ class BattleTests(unittest.TestCase):
         self.api.action('magic')
         self.assertEqual(self.api.magic_state(), (False, True))
         self.assertTrue(self.g.svr.wh3pt_magic_enabled)  # local switch never overwrites preferences
-        another = self.module.new(self.g.bm, self.lua.table_from(self.spells))
+        another = self.module.new(self.g.bm)
         another.start()
         self.assertEqual(another.magic_state(), (False, False))
 
@@ -135,7 +151,7 @@ class BattleTests(unittest.TestCase):
         for field in ('replay', 'multiplayer'):
             self.publish_campaign_magic()
             self.g[field] = True
-            other = self.module.new(self.g.bm, self.lua.table_from(self.spells))
+            other = self.module.new(self.g.bm)
             self.assertFalse(other.start())
             self.assertFalse(self.g.svr.wh3pt_magic_pending)
             self.assertEqual(other.magic_state(), (False, False))
@@ -165,7 +181,7 @@ class BattleTests(unittest.TestCase):
         self.assertEqual(self.g.own.men, 55)
         self.lua.execute("core:trigger_event('LoadingScreenDismissed', {}); core:trigger_event('ScriptEventAllModsLoaded', true)")
         self.assertEqual(sum('Started: revival timer' in line for line in self.g.logs.values()),1)
-        self.assertEqual(len(list(self.g.timers.keys())),3)
+        self.assertEqual(len(list(self.g.timers.keys())),4)  # ui, revival, magic, dock
 
     def test_all_battle_panel_actions_after_native_boot_event(self):
         self.publish_campaign_magic()
@@ -212,7 +228,7 @@ class BattleTests(unittest.TestCase):
         self.assertEqual(self.g.enemy.calls, 0)
         self.publish_campaign_magic()
         self.g.svr.wh3pt_revive_level = '0'
-        other = self.module.new(self.g.bm, self.lua.table_from(self.spells))
+        other = self.module.new(self.g.bm)
         other.start()
         count = self.g.own.calls
         other.tick(True)
@@ -243,24 +259,39 @@ class BattleTests(unittest.TestCase):
         self.assertEqual(self.api.magic_state(),(False,False))
         self.assertIn('回读未达到目标',self.api.status()[0])
 
-    def test_spell_cooldown_keys_and_controller_release(self):
+    def ability_ticks(self):
+        for _ in range(5): self.api.magic_tick()
+
+    def test_every_active_ability_gets_cooldown_and_uses_reset(self):
         self.lua.execute("""
-            own.spells={'wh_main_spell_fire_fireball','wh_main_spell_fire_fireball_upgraded',
-                'wh2_dlc09_spell_death_spirit_leech_bound','native_non_spell'}
+            own.spells={'wh_main_spell_fire_fireball','wh2_dlc10_unit_abilities_frost_breath'}
             ally.spells=own.spells;enemy.spells=own.spells
-            own.uses=1
         """)
         self.api.action('cooldown')
-        resets=list(self.g.player_army.controllers[1].resets.values())
-        self.assertEqual(len(resets),3)
-        self.assertNotIn('native_non_spell',resets)
+        keys=['wh_main_spell_fire_fireball','wh2_dlc10_unit_abilities_frost_breath']
+        uc=self.g.player_army.controllers[1]
+        self.assertEqual(list(uc.resets.values()),keys)
+        self.assertEqual(list(uc.refills.values()),keys)
+        self.assertTrue(self.g.own.uses['wh2_dlc10_unit_abilities_frost_breath'])
         self.assertFalse(self.g.own.script_control)
-        self.assertEqual(self.g.own.uses,1)
         self.assertIsNone(self.g.ally.cooldowns)
         self.assertIsNone(self.g.enemy.cooldowns)
+        self.assertIsNone(self.g.ally.uses)
+        self.assertIsNone(self.g.enemy.uses)
+
+    def test_abilities_reset_twice_a_second_and_stop_when_switched_off(self):
+        self.lua.execute("own.spells={'wh2_dlc10_unit_abilities_frost_breath'}")
         self.api.action('cooldown')
+        uc=self.g.player_army.controllers[1]
+        for _ in range(4): self.api.magic_tick()
+        self.assertEqual(len(uc.resets),1)
         self.api.magic_tick()
-        self.assertEqual(len(self.g.player_army.controllers[1].resets),3)
+        self.assertEqual(len(uc.resets),2)
+        self.api.action('cooldown')
+        self.ability_ticks()
+        self.assertEqual(len(uc.resets),2)
+        self.api.action('cooldown')
+        self.assertEqual(len(uc.resets),3)  # Switching on acts at once.
 
     def test_spell_error_releases_control_and_pauses(self):
         self.lua.execute("own.spells={'wh_main_spell_fire_fireball'};own.reject_reset=true")
@@ -268,6 +299,152 @@ class BattleTests(unittest.TestCase):
         self.assertFalse(self.g.own.script_control)
         self.assertEqual(self.api.magic_state(),(False,False))
         self.assertIn('已暂停',self.api.status()[0])
+
+    def publish_vigour(self):
+        self.publish_campaign_magic()
+        self.g.svr.wh3pt_vigour_enabled = True
+
+    def second(self, count=1):
+        for _ in range(count): self.g.timers.wh3pt_battle_revival()
+
+    def test_perfect_vigour_clears_the_fatigue_a_battle_starts_with(self):
+        self.publish_vigour()
+        self.lua.execute("""
+            own.fatigue='threshold_winded';ordinary.fatigue='threshold_exhausted'
+            ally.fatigue='threshold_winded';enemy.fatigue='threshold_winded'
+        """)
+        self.api.start()
+        self.assertEqual(self.api.fatigue_state(),(True,'开战后清除疲劳'))
+        self.second()
+        self.assertEqual(self.g.own.fatigue,'threshold_fresh')
+        self.assertEqual(self.g.ordinary.fatigue,'threshold_fresh')
+        self.assertEqual(self.g.ally.fatigue,'threshold_winded')
+        self.assertEqual(self.g.enemy.fatigue,'threshold_winded')
+        self.assertFalse(self.g.own.script_control)
+        self.assertIsNone(self.g.own.attributes.fatigue_immune)  # one call was enough
+        self.second(3)
+        self.assertEqual(self.g.player_army.controllers[1].fatigue_calls,2)
+        self.assertEqual(self.api.fatigue_state()[1],'疲劳已清 2队')
+
+    def test_any_penalised_level_is_cleared_and_unknown_states_are_left_alone(self):
+        self.publish_vigour()
+        self.api.start()
+        for state in ('threshold_active','threshold_winded','threshold_tired','threshold_very_tired','threshold_exhausted'):
+            self.g.own.fatigue=state
+            self.second()
+            self.assertEqual(self.g.own.fatigue,'threshold_fresh',state)
+            self.second()
+        calls=self.g.player_army.controllers[1].fatigue_calls
+        self.assertEqual(calls,5)
+        self.g.own.fatigue='threshold_new'
+        self.second(2)
+        self.assertEqual(self.g.player_army.controllers[1].fatigue_calls,calls)
+
+    def test_fatigue_is_left_alone_without_perfect_vigour(self):
+        self.publish_campaign_magic()
+        self.g.own.fatigue='threshold_winded'
+        self.api.start()
+        self.second(2)
+        self.assertEqual(self.g.own.fatigue,'threshold_winded')
+        self.assertEqual(self.api.fatigue_state(),(False,''))
+        self.assertEqual(len(self.g.player_army.controllers),0)
+
+    def test_vigour_setting_of_another_faction_is_ignored(self):
+        self.publish_vigour()
+        self.g.svr.wh3pt_magic_owner='other_faction'
+        self.g.own.fatigue='threshold_winded'
+        self.api.start()
+        self.second()
+        self.assertEqual(self.g.own.fatigue,'threshold_winded')
+
+    def test_fatigue_waits_for_the_battle_to_start(self):
+        self.publish_vigour()
+        self.g.own.fatigue='threshold_winded'
+        self.g.conflict=False
+        self.api.start()
+        self.second(5)  # deployment must not use up the tries
+        self.assertEqual(len(self.g.player_army.controllers),0)
+        self.g.conflict=True
+        self.second()
+        self.assertEqual(self.g.own.fatigue,'threshold_fresh')
+
+    def test_frozen_fatigue_is_cleared_with_the_attribute_lifted_for_one_pass(self):
+        self.publish_vigour()
+        self.lua.execute("own.fatigue='threshold_winded';own.frozen=true")
+        self.api.start()
+        self.second()
+        self.assertEqual(self.g.own.fatigue,'threshold_winded')
+        self.assertIsNone(self.g.own.attributes.fatigue_immune)
+        self.second()
+        self.assertEqual(self.g.own.fatigue,'threshold_fresh')
+        self.assertFalse(self.g.own.attributes.fatigue_immune)
+        self.second()
+        self.assertTrue(self.g.own.attributes.fatigue_immune)
+        self.assertEqual(self.api.fatigue_state()[1],'疲劳已清 1队')
+
+    def test_fatigue_the_game_will_not_clear_is_reported_and_left_alone(self):
+        self.publish_vigour()
+        self.lua.execute("own.fatigue='threshold_winded';own.stuck=true")
+        self.api.start()
+        self.second(6)
+        self.assertEqual(self.g.player_army.controllers[1].fatigue_calls,2)
+        self.assertTrue(self.g.own.attributes.fatigue_immune)
+        self.assertFalse(self.g.own.script_control)
+        self.assertEqual(self.api.fatigue_state()[1],'疲劳已清 0队 · 未清 1队')
+
+    def test_fatigue_error_releases_control_and_pauses(self):
+        self.publish_vigour()
+        self.lua.execute("own.fatigue='threshold_winded';own.reject_fatigue=true")
+        self.api.start()
+        self.second()
+        self.assertFalse(self.g.own.script_control)
+        self.assertEqual(self.api.fatigue_state(),(False,'清除疲劳已暂停'))
+        self.assertIn('fatigue API failure',self.api.status()[0])
+
+    def test_fatigue_reinforcements_dead_units_and_lifecycle(self):
+        self.publish_vigour()
+        self.api.start()
+        self.lua.execute("""
+            late=make_unit(6,true)
+            late.fatigue='threshold_tired'
+            late.deployed=false
+            late_army=make_army(6,true,{late})
+            battle_armies[#battle_armies+1]=late_army
+        """)
+        self.second()
+        self.assertEqual(len(self.g.late_army.controllers),0)
+        self.g.late.deployed=True
+        self.second()
+        self.assertEqual(self.g.late.fatigue,'threshold_fresh')
+        self.second()
+        self.g.late.men=0
+        self.g.late.fatigue='threshold_tired'
+        self.second()
+        self.assertEqual(self.g.late_army.controllers[1].fatigue_calls,1)
+        self.g.phases.Complete()
+        self.assertFalse(self.api.fatigue_state()[0])
+        self.assertIsNone(self.api.fatigue_tick())
+
+    def test_fatigue_result_shows_in_the_panel_and_fits_the_title_row(self):
+        self.publish_vigour()
+        self.g.own.fatigue='threshold_winded'
+        self.api.start()
+        self.g.timers.wh3pt_battle_ui()
+        label=self.g.widgets.wh3pt_battle_fatigue
+        self.assertEqual(label.text,'开战后清除疲劳')
+        self.second(2)
+        self.assertEqual(label.text,'疲劳已清 1队')
+        for text in (1.0,1.25,1.5,2.0):
+            self.g.text_scale=text;self.g.screen_width=3840;self.g.screen_height=2160
+            runtime=self.module.new(self.g.bm)
+            runtime.ui()
+            title=self.g.widgets.wh3pt_battle_title
+            label=self.g.widgets.wh3pt_battle_fatigue
+            close=self.g.widgets.wh3pt_battle_close
+            self.assertLess(title.TextDimensions(title)[0],title.w,text)
+            self.assertLess(self.g.measure_text('疲劳已清 20队 · 未清 20队',12),label.w,text)
+            self.assertLessEqual(title.x+title.w,label.x)
+            self.assertLessEqual(label.x+label.w,close.x)
 
     def test_magic_reinforcements_dead_units_and_lifecycle(self):
         self.api.start();self.api.action('magic');self.api.action('cooldown')
@@ -282,11 +459,11 @@ class BattleTests(unittest.TestCase):
         self.assertEqual(self.g.reinforcement_army.current,30)
         self.assertEqual(len(self.g.reinforcement_army.controllers),0)
         self.g.reinforcement.deployed=True
-        self.api.magic_tick()
+        self.ability_ticks()
         self.assertEqual(self.g.reinforcement.cooldowns['wh_main_spell_fire_fireball'],0)
         self.g.reinforcement.men=0
         count=len(self.g.reinforcement_army.controllers[1].resets)
-        self.api.magic_tick()
+        self.ability_ticks()
         self.assertEqual(len(self.g.reinforcement_army.controllers[1].resets),count)
         self.g.phases.Complete()
         self.assertIsNone(self.g.timers['wh3pt_battle_magic'])
@@ -383,15 +560,212 @@ class BattleTests(unittest.TestCase):
                 self.assertLessEqual(item.x + item.w, self.g.screen_width)
                 self.assertLessEqual(item.y + item.h, self.g.screen_height)
 
-    def test_battle_magic_panel_fits_small_and_large_screens(self):
-        for width,height in [(1280,720),(1920,1080),(3840,2160)]:
+    BAR = (388, 54)  # hud_battle.twui.xml: bar_small_top, docked top right at 1600x900.
+
+    def with_bar(self,width):
+        self.g.bar_w=width
+        self.lua.execute("""
+            function find_uicomponent(_,first,second,third)
+                assert(first=='hud_battle' and second=='radar_holder' and third=='bar_small_top')
+                return {Dimensions=function() return bar_w,54 end,
+                    Position=function() return screen_width+500,0 end}  -- still sliding in
+            end
+        """)
+
+    def test_battle_panel_fits_and_stays_clear_of_the_speed_buttons(self):
+        for width,height in [(1280,720),(1920,1080),(2560,1440),(3840,2160)]:
             self.g.screen_width=width;self.g.screen_height=height
-            runtime=self.module.new(self.g.bm,self.lua.table_from(self.spells))
+            bar=int(self.BAR[0]*width/1600)
+            self.with_bar(bar)
+            runtime=self.module.new(self.g.bm)
             runtime.ui()
-            for name in ['panel','magic','cooldown','status']:
+            launcher=self.g.widgets.wh3pt_battle_open
+            panel=self.g.widgets.wh3pt_battle_panel
+            for widget in (launcher,panel):
+                self.assertLessEqual(widget.x+widget.w,width-bar,(width,widget.id))
+                self.assertGreaterEqual(widget.x,0)
+            for name in ['close','fatigue','mode','revive','heal','ammo','magic','cooldown','status']:
                 widget=self.g.widgets['wh3pt_battle_'+name]
-                self.assertLessEqual(widget.x+widget.w,width)
-                self.assertLessEqual(widget.y+widget.h,height)
+                self.assertGreaterEqual(widget.x,panel.x,name)
+                self.assertGreaterEqual(widget.y,panel.y,name)
+                self.assertLessEqual(widget.x+widget.w,panel.x+panel.w,name)
+                self.assertLessEqual(widget.y+widget.h,panel.y+panel.h,name)
+                self.assertLessEqual(widget.y+widget.h,height,name)
+
+    def test_battle_panel_scales_with_the_text_not_the_resolution(self):
+        for width,height,text,scale in [(2560,1440,1.25,1.25),(3840,2160,2.0,2.0),(1920,1080,1.0,1.0)]:
+            self.g.screen_width=width;self.g.screen_height=height;self.g.text_scale=text
+            runtime=self.module.new(self.g.bm)
+            runtime.ui()
+            panel=self.g.widgets.wh3pt_battle_panel
+            self.assertEqual(self.g.widgets.wh3pt_battle_open.w,int(112*scale))
+            self.assertEqual((panel.w,panel.h),(int(336*scale),int(174*scale)))
+            self.assertLess(panel.h/height,0.17)
+            self.assertTrue(self.g.widgets.wh3pt_battle_probe.dead)
+
+    def test_battle_panel_scale_falls_back_without_text_measurement(self):
+        self.lua.execute("text_dimensions_enabled=false")
+        self.g.screen_width=2560;self.g.screen_height=1440
+        self.api.start();self.g.timers['wh3pt_battle_ui']()
+        self.assertEqual(self.g.widgets.wh3pt_battle_open.w,224)
+        self.assertTrue(self.g.widgets.wh3pt_battle_probe.dead)
+
+    def test_every_battle_label_fits_its_button(self):
+        for text in (1.0,1.25,1.5,2.0):
+            self.g.text_scale=text;self.g.screen_width=3840;self.g.screen_height=2160
+            runtime=self.module.new(self.g.bm)
+            runtime.ui()
+            for name in ('open','mode','revive','heal','ammo','magic','cooldown'):
+                widget=self.g.widgets['wh3pt_battle_'+name]
+                self.assertLess(self.g.measure_text(widget.text,12),widget.w,(text,name,widget.text))
+
+    def test_battle_panel_falls_back_when_the_bar_cannot_be_found(self):
+        self.g.screen_width=1920;self.g.screen_height=1080
+        self.api.start();self.g.timers['wh3pt_battle_ui']()
+        launcher=self.g.widgets.wh3pt_battle_open
+        self.assertLess(launcher.x+launcher.w,1920-388)
+
+    def test_launcher_follows_the_hud_while_it_settles_then_stops_looking(self):
+        self.g.screen_width=2560;self.g.screen_height=1440
+        self.with_bar(388)  # not scaled yet
+        self.api.start();self.g.timers['wh3pt_battle_ui']()
+        launcher=self.g.widgets.wh3pt_battle_open
+        first=launcher.x
+        self.g.bar_w=620
+        self.g.timers.wh3pt_battle_dock()
+        self.assertEqual(launcher.x,first-232)
+        self.assertLessEqual(launcher.x+launcher.w,2560-620)
+        for _ in range(20):
+            timer=self.g.timers.wh3pt_battle_dock
+            self.g.timers.wh3pt_battle_dock=None
+            if timer is None: break
+            timer()
+        self.assertIsNone(self.g.timers.wh3pt_battle_dock)
+
+    def mouse(self,event):
+        self.g.core.trigger_event(self.g.core,event,self.lua.table_from({'string':'wh3pt_battle_open'}))
+
+    def watch(self):
+        timer=self.g.timers.wh3pt_battle_watch
+        self.g.timers.wh3pt_battle_watch=None
+        if timer: timer()
+        return timer is not None
+
+    def test_launcher_stays_where_it_is_dropped_when_the_engine_puts_it_back(self):
+        self.api.start();self.g.timers['wh3pt_battle_ui']()
+        launcher=self.g.widgets.wh3pt_battle_open
+        panel=self.g.widgets.wh3pt_battle_panel
+        start=(launcher.x,launcher.y)
+        self.mouse('ComponentMouseOn')
+        self.watch()
+        launcher.dragged=True
+        launcher.MoveTo(launcher,300,420)
+        self.watch()
+        # Release: the engine restores the start of the drag, then sends the click.
+        launcher.dragged=False
+        launcher.MoveTo(launcher,*start)
+        self.click('open')
+        self.assertFalse(panel.visible)
+        self.watch()
+        self.assertEqual((launcher.x,launcher.y),(300,420))
+        self.assertEqual(self.g.svr.wh3pt_battle_launcher,'300,420')
+        self.assertEqual(panel.y,420+launcher.h+4)
+        self.click('open')
+        self.assertTrue(panel.visible)
+
+    def test_launcher_drop_without_a_click_still_counts(self):
+        self.api.start();self.g.timers['wh3pt_battle_ui']()
+        launcher=self.g.widgets.wh3pt_battle_open
+        start=(launcher.x,launcher.y)
+        self.mouse('ComponentMouseOn')
+        self.watch()
+        launcher.dragged=True
+        launcher.MoveTo(launcher,500,300)
+        self.watch()
+        launcher.dragged=False
+        launcher.MoveTo(launcher,*start)
+        self.watch()
+        self.assertEqual((launcher.x,launcher.y),(500,300))
+
+    def test_small_wobble_is_a_click_and_stays_home(self):
+        self.api.start();self.g.timers['wh3pt_battle_ui']()
+        launcher=self.g.widgets.wh3pt_battle_open
+        start=(launcher.x,launcher.y)
+        self.mouse('ComponentMouseOn')
+        self.watch()
+        launcher.dragged=True
+        launcher.MoveTo(launcher,start[0]+2,start[1]+1)
+        self.watch()
+        launcher.dragged=False
+        self.click('open')
+        self.assertTrue(self.g.widgets.wh3pt_battle_panel.visible)
+        self.watch()
+        self.assertEqual((launcher.x,launcher.y),start)
+
+    def test_placed_launcher_is_no_longer_docked(self):
+        self.g.screen_width=2560;self.g.screen_height=1440
+        self.with_bar(388)
+        self.api.start();self.g.timers['wh3pt_battle_ui']()
+        launcher=self.g.widgets.wh3pt_battle_open
+        launcher.MoveTo(launcher,300,420)
+        self.click('open')
+        self.g.bar_w=620
+        self.g.timers.wh3pt_battle_dock()
+        self.g.phases.Deployed()
+        self.assertEqual((launcher.x,launcher.y),(300,420))
+
+    def test_launcher_watch_stops_with_the_mouse_and_the_battle(self):
+        self.api.start();self.g.timers['wh3pt_battle_ui']()
+        self.assertIsNone(self.g.timers.wh3pt_battle_watch)
+        self.mouse('ComponentMouseOn')
+        self.assertTrue(self.watch())
+        self.assertTrue(self.watch())
+        self.mouse('ComponentMouseOff')
+        self.watch()
+        self.assertFalse(self.watch())
+        self.mouse('ComponentMouseOn')
+        self.g.phases.Complete()
+        self.watch()
+        self.assertFalse(self.watch())
+
+    def click(self,key):
+        self.g.core.trigger_event(self.g.core,'ComponentLClickUp',self.lua.table_from({'string':'wh3pt_battle_'+key}))
+
+    def test_dragged_launcher_is_remembered_and_is_not_a_click(self):
+        self.api.start();self.g.timers['wh3pt_battle_ui']()
+        launcher=self.g.widgets.wh3pt_battle_open
+        panel=self.g.widgets.wh3pt_battle_panel
+        self.assertTrue(launcher.moveable)
+        launcher.MoveTo(launcher,800,200)
+        self.click('open')
+        self.assertFalse(panel.visible)
+        self.assertEqual(self.g.svr.wh3pt_battle_launcher,'800,200')
+        self.click('open')
+        self.assertTrue(panel.visible)
+        self.assertEqual(panel.y,200+launcher.h+4)
+        self.assertEqual(panel.x+panel.w,800+launcher.w)
+        other=self.module.new(self.g.bm)
+        other.ui()
+        again=self.g.widgets.wh3pt_battle_open
+        self.assertEqual((again.x,again.y),(800,200))
+
+    def test_panel_opens_above_a_launcher_dragged_to_the_bottom(self):
+        self.api.start();self.g.timers['wh3pt_battle_ui']()
+        launcher=self.g.widgets.wh3pt_battle_open
+        panel=self.g.widgets.wh3pt_battle_panel
+        launcher.MoveTo(launcher,900,self.g.screen_height-launcher.h)
+        self.click('open');self.click('open')
+        self.assertEqual(panel.y+panel.h+4,launcher.y)
+
+    def test_panel_content_follows_it_when_it_opens_elsewhere(self):
+        self.api.start();self.g.timers['wh3pt_battle_ui']()
+        launcher=self.g.widgets.wh3pt_battle_open
+        panel=self.g.widgets.wh3pt_battle_panel
+        status=self.g.widgets.wh3pt_battle_status
+        offset=(status.x-panel.x,status.y-panel.y)
+        launcher.MoveTo(launcher,700,300)
+        self.click('open');self.click('open')
+        self.assertEqual((status.x-panel.x,status.y-panel.y),offset)
 
 
 if __name__ == '__main__':

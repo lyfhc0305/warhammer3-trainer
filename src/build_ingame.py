@@ -128,7 +128,7 @@ LABEL_STATES['probe'] = (PALETTE['TextMain'], '14', 'Left')
 LABEL_STATES['hint'] = (PALETTE['Quiet'], '12', 'Left')
 
 HINTS = {
-    'vigour': '全军战斗体力常驻充沛',
+    'vigour': '不累积疲劳，开战后清除开局疲劳',
     'unbreakable': '全军战斗永不白旗溃散',
     'vanguard': '全军获得先锋部署能力',
     'attrition': '全军免疫战役非战斗损耗',
@@ -362,18 +362,6 @@ def icon_template():
     return ET.tostring(root, encoding='utf-8', xml_declaration=True)
 
 
-def battle_spell_keys(game=GAME):
-    """Read-only spell allowlist; no global ability/cooldown database overrides."""
-    source = read_pack(Path(game) / 'data/db.pack',
-                       lambda n: n.startswith('db\\unit_special_abilities_tables\\'))
-    spells = {r['key']: True for data in source.values()
-              for r in decode('unit_special_abilities_tables', data)[1]
-              if not r['passive'] and (r['mana_cost'] > 0 or '_spell_' in r['key'])}
-    if not spells:
-        raise ValueError('无法读取游戏法术目录')
-    return spells
-
-
 def ui_files(catalog, strategic=None, game=GAME):
     """Everything in the pack that defines the look of the panel."""
     files = {'script\\campaign\\mod\\wh3pt_panel.lua': (
@@ -384,12 +372,10 @@ def ui_files(catalog, strategic=None, game=GAME):
         + (ROOT / 'ingame/target_actions.lua').read_text(encoding='utf-8') + '\n'
         + (ROOT / 'ingame/mortarchs.lua').read_text(encoding='utf-8') + '\n'
         + (ROOT / 'ingame/income.lua').read_text(encoding='utf-8') + '\n'
+        + (ROOT / 'ingame/elite_tabs.lua').read_text(encoding='utf-8') + '\n'
         + (ROOT / 'ingame/panel.lua').read_text(encoding='utf-8')
     ).encode('utf-8')}
-    files['script\\battle\\mod\\wh3pt_battle.lua'] = (
-        'local SPELL_KEYS = ' + lua(battle_spell_keys(game)) + '\n'
-        + (ROOT / 'ingame/battle.lua').read_text(encoding='utf-8')
-    ).encode('utf-8')
+    files['script\\battle\\mod\\wh3pt_battle.lua'] = (ROOT / 'ingame/battle.lua').read_bytes()
     for name, make in UI_IMAGES.items():
         files['ui\\wh3pt\\' + name + '.png'] = make()
     for kind in ['button', 'label', 'card']:
@@ -453,10 +439,10 @@ def build_ingame(game=GAME, addons=None, local_dir=None, workshop=None):
         default=cs_row['effect_value'], step=1, toggle=True, sign=1, unit='',
         hint=HINTS['chainsword'],
     ))
-    for key, name, title in [
-        ('growth', '@玩家战役1回合发展.pack', '发展'),
-        ('construction', '@玩家战役1回合建筑.pack', '建筑'),
-        ('research', '@玩家战役1回合科技.pack', '科技'),
+    for key, name, title, unit in [
+        ('growth', '@玩家战役1回合发展.pack', '发展', '点'),
+        ('construction', '@玩家战役1回合建筑.pack', '建筑', '%'),
+        ('research', '@玩家战役1回合科技.pack', '科技', '%'),
     ]:
         pack_path = (local_dir / name) if (local_dir / name).is_file() else (REFERENCE / name)
         row = next(
@@ -467,7 +453,7 @@ def build_ingame(game=GAME, addons=None, local_dir=None, workshop=None):
             id=key, label=title + '加速', effect=row['effect'],
             scope=row['effect_scope'], group='战役', max=abs(row['effect_value']),
             default=abs(row['effect_value']), step=10,
-            sign=-1 if row['effect_value'] < 0 else 1, unit='效果值',
+            sign=-1 if row['effect_value'] < 0 else 1, unit=unit,
         ))
     # Independent ability variants: enabling ammo must not implicitly heal or resurrect.
     ability_tables = {}
@@ -504,11 +490,11 @@ def build_ingame(game=GAME, addons=None, local_dir=None, workshop=None):
             id=feature,
             label={'healing': '持续回血', 'revive': '回血并复活', 'ammo': '持续补充弹药'}[feature],
             effects=effects, choices=rates, scope='faction_to_force_own', group='特殊',
-            max=len(rates), default=3, step=1, integer=True, sign=1, unit='% / 秒',
+            max=len(rates), default=3, step=1, integer=True, sign=1, unit='%/秒',
             hint={
-                'healing': '每队每秒仅恢复自身生命，不复活阵亡模型',
-                'revive': '每队每秒恢复自身生命，并复活自身阵亡模型',
-                'ammo': '每队每秒仅补充自身弹药，不回血或复活',
+                'healing': '每秒恢复自身生命，不复活',
+                'revive': '每秒恢复自身生命并复活',
+                'ammo': '每秒补充自身弹药，不回血',
             }[feature],
         ))
     for (table, version), rows in ability_tables.items():
@@ -517,14 +503,14 @@ def build_ingame(game=GAME, addons=None, local_dir=None, workshop=None):
         feature['manual_battle'] = feature['group'] == '部队' or feature['id'] in {'vigour', 'unbreakable', 'vanguard', 'chainsword', 'healing', 'revive', 'ammo'}
     catalog.append(dict(id='income', label='每回合收入增幅', group='战役', min=1, max=10000,
         default=100, step=25, integer=True, unit='%', income=True, manual_battle=False,
-        hint='与游戏内加成相加，不是总收入倍率', presets=[100, 200, 500, 1000]))
+        hint='与已有加成相加，非总收入倍率', presets=[100, 200, 500, 1000]))
     catalog.extend([
         dict(id='battle_magic', label='无限魔法之风', group='特殊', min=1, max=1,
              default=1, step=1, toggle=True, unit='', manual_battle=True, battle_setting='magic',
              hint='开战自动启用；持续补充玩家魔法池与储备'),
-        dict(id='battle_cooldown', label='法术无需冷却', group='特殊', min=1, max=1,
+        dict(id='battle_cooldown', label='技能无冷却无限次数', group='特殊', min=1, max=1,
              default=1, step=1, toggle=True, unit='', manual_battle=True, battle_setting='cooldown',
-             hint='开战自动启用；保留施法动作及有限使用次数'),
+             hint='开战自动启用；玩家全部主动技能与法术'),
     ])
     bundles = [
         dict(
@@ -604,7 +590,7 @@ def build_ingame(game=GAME, addons=None, local_dir=None, workshop=None):
 
 
 def rebuild_ui_only(pack_path):
-    """Swap the UI into an existing pack; keeps its catalog and tables, reads only the spell list."""
+    """Swap the UI into an existing pack; keeps its catalog and tables."""
     files = read_pack(pack_path)
     current = files['script\\campaign\\mod\\wh3pt_panel.lua'].decode('utf-8')
     head = 'local CATALOG = '
