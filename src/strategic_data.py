@@ -100,10 +100,14 @@ def strategic_catalog(game):
         if not unit or r['pool'] not in pools:
             continue
         rules = eligibility.setdefault(unit, [])
+        holders = pool_factions.get(r['pool'], [])
         if r['faction_requirement'] or r['subculture_requirement']:
-            rules.append(dict(faction=r['faction_requirement'], subculture=r['subculture_requirement']))
+            # A pool one faction holds is that faction's own, even where its rows name a
+            # whole subculture: Imrik's dragons are marked for all High Elves.
+            only = holders[0] if len(holders) == 1 else None
+            rules.append(dict(faction=r['faction_requirement'] or only, subculture=r['subculture_requirement']))
         else:
-            rules.extend(dict(faction=f) for f in pool_factions.get(r['pool'], []))
+            rules.extend(dict(faction=f) for f in holders)
     land = {r['key']: r for r in tables['land_units_tables']}
     ui_groups = {r['key']: r for r in tables['ui_unit_groupings_tables']}
     ui_parents = {r['key']: r for r in tables['ui_unit_group_parents_tables']}
@@ -138,6 +142,12 @@ def strategic_catalog(game):
                               category_order=parent.get('order', 999),
                               unit_type=labels.get('ui_unit_groupings_onscreen_' + ui_group, ''),
                               eligibility=eligibility.get(row['unit'], [])))
+    # An encounter's boss shares its name with the regiment the player really gets, and no
+    # script ever grants it. It stays on the elite page as a choice, not as a second card.
+    regiments = {u['label'] for u in units if u['label'] and not u['id'].endswith('_boss')}
+    for unit in units:
+        if unit['id'].endswith('_boss') and unit['label'] in regiments:
+            unit['eligibility'] = []
     return dict(resources=sorted(resources, key=lambda r: r['id']), units=sorted(units, key=lambda r: r['id']))
 
 

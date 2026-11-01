@@ -411,7 +411,11 @@ class InGameTests(unittest.TestCase):
         main={r['unit']:r for n,d in self.files.items() if n.startswith('db\\main_units_tables\\') for r in decode('main_units_tables',d)[1]}
         ranks={r['unit']:r for n,d in self.files.items() if n.startswith('db\\campaign_mercenary_unit_character_level_restrictions_tables\\') for r in decode('campaign_mercenary_unit_character_level_restrictions_tables',d)[1]}
         self.strategic_fixture()
-        self.lua.execute("test_nag_faction=cm:get_faction('player'); function test_nag_faction:subculture() return 'wh3_dlc29_sc_nag_undead_legions' end")
+        self.lua.execute("""
+            test_nag_faction=cm:get_faction('player')
+            function test_nag_faction:name() return 'wh3_dlc29_nag_host_of_nagash' end
+            function test_nag_faction:subculture() return 'wh3_dlc29_sc_nag_undead_legions' end
+        """)
         self.api.native_toggle(True);self.native_flush()
         all_keys=[]
         for group,units in config.unit_locks.items():
@@ -441,6 +445,72 @@ class InGameTests(unittest.TestCase):
         self.g.native_pool[key].count=0
         self.g.first_tick(); self.native_flush()
         self.assertEqual(self.g.native_pool[key].count,20)
+
+    def faction_of(self,name,subculture):
+        return self.lua.eval("function(n,s) return {name=function() return n end,subculture=function() return s end} end")(name,subculture)
+
+    def regiment(self,key):
+        return next(d for d in self.api.strategic.units.values() if d.id==key)
+
+    def test_a_pool_one_faction_holds_is_that_factions_own(self):
+        elves='wh2_main_sc_hef_high_elves'
+        for dragon in ('sun','moon','star','forest','black'):
+            unit=self.regiment('wh2_dlc15_hef_mon_'+dragon+'_dragon_imrik')
+            self.assertTrue(self.api.regiment_belongs(unit,self.faction_of('wh2_dlc15_hef_imrik',elves)))
+            self.assertFalse(self.api.regiment_belongs(unit,self.faction_of('wh2_main_hef_avelorn',elves)))
+
+    def test_shared_pools_still_go_by_subculture(self):
+        lions=self.regiment('wh2_dlc15_hef_mon_war_lions_of_chrace_ror_0')
+        for name in ('wh2_dlc15_hef_imrik','wh2_main_hef_avelorn'):
+            self.assertTrue(self.api.regiment_belongs(lions,self.faction_of(name,'wh2_main_sc_hef_high_elves')))
+
+    def test_a_boss_named_like_a_regiment_is_nobodys_by_default(self):
+        imrik=self.faction_of('wh2_dlc15_hef_imrik','wh2_main_sc_hef_high_elves')
+        norsca=self.faction_of('wh_dlc08_nor_norsca','wh_dlc08_sc_nor_norsca')
+        for dragon in ('sun','moon','star','forest','black'):
+            self.assertFalse(self.api.regiment_belongs(self.regiment('wh2_dlc15_hef_mon_'+dragon+'_dragon_imrik_boss'),imrik))
+        self.assertFalse(self.api.regiment_belongs(self.regiment('wh_dlc08_nor_mon_war_mammoth_boss'),norsca))
+        self.assertTrue(self.api.regiment_belongs(self.regiment('wh_dlc08_nor_mon_war_mammoth_ror_1'),norsca))
+
+    def test_a_boss_with_a_name_of_its_own_stays_with_its_faction(self):
+        self.assertTrue(self.api.regiment_belongs(self.regiment('wh_dlc08_grn_mon_giant_boss'),
+                                                  self.faction_of('wh_main_grn_greenskins','wh_main_sc_grn_greenskins')))
+
+    def test_nobody_is_offered_one_name_twice(self):
+        from strategic_data import strategic_catalog
+        units=strategic_catalog(GAME)['units']
+        names={u['id']:u['label'] for u in units}
+        offered={}
+        for unit in units:
+            for rule in unit['eligibility']:
+                offered.setdefault((rule.get('faction'),rule.get('subculture')),set()).add(unit['id'])
+        for rule,ids in offered.items():
+            labels=[names[i] for i in ids]
+            self.assertEqual(len(labels),len(set(labels)),rule)
+
+    def test_dragons_and_bosses_can_still_be_added_by_hand(self):
+        self.strategic_fixture()
+        self.api.native_toggle(True); self.native_flush()
+        for key in ('wh2_dlc15_hef_mon_sun_dragon_imrik','wh2_dlc15_hef_mon_sun_dragon_imrik_boss'):
+            index=next(i for i,d in self.api.strategic.units.items() if d.id==key)
+            native=self.api.strategic.units[index].native_key
+            self.assertIsNone(self.g.native_pool[native])
+            self.api.native_select(index); self.native_flush()
+            self.assertEqual(self.g.native_pool[native].count,20)
+
+    def test_what_an_older_version_left_in_the_pool_goes(self):
+        self.strategic_fixture()
+        key=self.regiment('wh2_dlc15_hef_mon_sun_dragon_imrik_boss').native_key
+        self.g.native_pool[key]=self.lua.table(count=20,max=20)
+        self.api.native_toggle(True); self.native_flush()
+        self.assertEqual((self.g.native_pool[key].count,self.g.native_pool[key].max),(0,0))
+
+    def test_every_dragon_keeps_its_record_for_saves_that_recruited_one(self):
+        main={r['unit'] for r in decode('main_units_tables',self.files['db\\main_units_tables\\wh3pt_native_ror'])[1]}
+        for dragon in ('sun','moon','star','forest','black'):
+            for version in ('','_boss'):
+                self.assertIn('wh3pt_ror_wh2_dlc15_hef_mon_'+dragon+'_dragon_imrik'+version,main)
+        self.assertIn('wh3pt_ror_wh_dlc08_nor_mon_war_mammoth_boss',main)
 
     def test_native_recruitment_foreign_key_validation_rejects_missing_land_unit(self):
         from strategic_data import validate_native_recruitment_files
