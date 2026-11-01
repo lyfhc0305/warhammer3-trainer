@@ -452,6 +452,7 @@ def ui_files(catalog, strategic=None, game=GAME):
         + (ROOT / 'ingame/manual_battle.lua').read_text(encoding='utf-8') + '\n'
         + (ROOT / 'ingame/target_actions.lua').read_text(encoding='utf-8') + '\n'
         + (ROOT / 'ingame/mortarchs.lua').read_text(encoding='utf-8') + '\n'
+        + (ROOT / 'ingame/auto_upgrade.lua').read_text(encoding='utf-8') + '\n'
         + (ROOT / 'ingame/income.lua').read_text(encoding='utf-8') + '\n'
         + (ROOT / 'ingame/elite_tabs.lua').read_text(encoding='utf-8') + '\n'
         + (ROOT / 'ingame/kit.lua').read_text(encoding='utf-8') + '\n'

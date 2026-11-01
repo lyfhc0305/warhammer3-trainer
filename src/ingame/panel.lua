@@ -16,6 +16,7 @@ local player_epoch = 0
 local manual_battle
 local target_actions
 local mortarch_actions
+local auto_upgrade
 local income_actions
 local resource_interface
 local COMMANDS = {
@@ -28,6 +29,7 @@ local COMMANDS = {
     {id='free_skills', label='免技能点学习', short='免技能点学习', unit='', default=1, step=1, max=1, integer=true, toggle=true, btn='开关', hint='原生技能图标上右键学习'},
     {id='mortarchs', label='死亡统帅无条件收服', short='死亡统帅无条件收服', unit='', default=1, step=1, max=1, integer=true, toggle=true, btn='开关', hint='免前置和费用，原生页面收服'},
     {id='mortarch_buildings', label='收服关联建筑解锁', short='收服关联建筑解锁', unit='', default=1, step=1, max=1, integer=true, toggle=true, btn='解锁', hint='莱弥亚/血骑士，仍需正常建造'},
+    {id='auto_upgrade', label='建筑自动升级', short='建筑自动升级', unit='', default=1, step=1, max=1, integer=true, toggle=true, btn='开关', hint='唯一升级选项且资源足够时，回合开始自动升级'},
     {id='preset_campaign', label='一键战役发育预设', short='战役发育预设', unit='', default=1, step=1, max=1, integer=true, toggle=true, preset=true, btn='启用', hint='秩序/发展/补员/移速/科研/建造'},
     {id='preset_battle', label='一键精锐战斗预设', short='精锐战斗预设', unit='', default=1, step=1, max=1, integer=true, toggle=true, preset=true, btn='启用', hint='特保/远抗/攻防/伤害/弹药/不溃'},
 }
@@ -50,7 +52,7 @@ local PAGES = {
     {name='总览', title='总览'},
     {name='内政', title='内政与经济', sections={
         {'资金与收入', 'treasury', 'income', 'upkeep'},
-        {'建设与科技', 'growth', 'construction', 'research'},
+        {'建设与科技', 'growth', 'construction', 'auto_upgrade', 'research'},
         {'秩序与外交', 'order', 'diplomacy'},
     }},
     {name='军队', title='军队与将领', sections={
@@ -338,6 +340,7 @@ local function clear_all()
     if set_native_recruitment then set_native_recruitment(false, true) end
     if target_actions then target_actions.toggle(false) end
     if mortarch_actions then mortarch_actions.toggle(false) end
+    if auto_upgrade then auto_upgrade.toggle(false) end
     for _, def in ipairs(CATALOG) do disable_feature(def) end
     M.busy = true
     player_callback(function()
@@ -707,6 +710,8 @@ local function run_command_action(id, raw)
         mortarch_actions.toggle()
     elseif id == 'mortarch_buildings' then
         mortarch_actions.unlock_buildings()
+    elseif id == 'auto_upgrade' then
+        auto_upgrade.toggle()
     elseif id == 'free_skills' then
         target_actions.toggle()
     elseif id == 'unit_rank' then
@@ -752,7 +757,8 @@ end
 local function snapshot()
     local snap = {features = {}, native = M.native_enabled,
         free_skills = target_actions and target_actions.enabled() or false,
-        mortarchs = mortarch_actions and mortarch_actions.enabled() or false}
+        mortarchs = mortarch_actions and mortarch_actions.enabled() or false,
+        auto_upgrade = auto_upgrade and auto_upgrade.enabled() or false}
     for _, def in ipairs(CATALOG) do
         local ok, active, actual = pcall(read, def)
         if ok and active then snap.features[def.id] = actual end
@@ -790,6 +796,7 @@ local function restore(snap, title)
     if mortarch_actions and mortarch_actions.supported() and snap.mortarchs ~= mortarch_actions.enabled() then
         mortarch_actions.toggle(snap.mortarchs)
     end
+    if auto_upgrade and snap.auto_upgrade ~= auto_upgrade.enabled() then auto_upgrade.toggle(snap.auto_upgrade) end
     M.busy = true
     message('正在撤销' .. title .. '……')
     when_settled(function()
@@ -826,7 +833,7 @@ views = create_views({
     set_resource = set_resource, native_toggle = function(enabled) set_native_recruitment(enabled) end,
     native_select = select_native_regiment, elite_tabs = function() return elite_tabs end,
     arrange_native_cards = arrange_native_cards, targets = function() return target_actions end,
-    mortarchs = function() return mortarch_actions end, income = income_actions,
+    mortarchs = function() return mortarch_actions end, auto_upgrade = function() return auto_upgrade end, income = income_actions,
     resource_interface = function(def) return resource_interface(def) end,
     regiment_belongs = regiment_belongs_to_faction, strategic_name = strategic_name,
     collect_characters = collect_characters, setting = setting, validate = validate,
@@ -846,6 +853,7 @@ reset_player_context = function()
     manual_battle.migrate()
     income_actions.migrate()
     if target_actions then target_actions.reset() end
+    if auto_upgrade then auto_upgrade.reset() end
     M.selected_cqi, M.busy, native_pending = nil, false, false
     native_revision = native_revision + 1
     for _, def in ipairs(CATALOG) do
@@ -881,6 +889,8 @@ local function start()
         character=function() return M.selected_cqi and cm:get_character_by_cqi(M.selected_cqi) or nil end,
         callback=player_callback, guard=guarded, render=function() views.refresh() end})
     mortarch_actions = create_mortarch_actions({faction=faction, message=message, callback=player_callback, guard=guarded})
+    auto_upgrade = create_auto_upgrade({faction=faction, setting=setting, message=message,
+        callback=player_callback, guard=guarded, render=function() views.refresh() end})
     core:remove_listener('wh3pt_unit_card_select')
     core:remove_listener('wh3pt_free_skill_click')
     core:add_listener('wh3pt_free_skill_click', 'ComponentRClickUp', true, function(c)
@@ -983,7 +993,7 @@ cm:add_first_tick_callback(function() guarded(start) end)
 -- Returned only for the offline Lua harness; no global game functions are patched.
 return {
     manual=manual_battle, income=income_actions, read_model=read_model,
-    targets=function() return target_actions end,
+    targets=function() return target_actions end, auto_upgrade=function() return auto_upgrade end,
     start=start, read=read, apply=apply, clear=clear_all, validate=validate,
     strategic=STRATEGIC, set_resource=set_resource, native_toggle=set_native_recruitment,
     native_select=select_native_regiment, native_sync=schedule_native_sync, native_filter=arrange_native_cards,

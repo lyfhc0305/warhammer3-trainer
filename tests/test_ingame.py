@@ -1114,6 +1114,19 @@ class InGameTests(unittest.TestCase):
         self.assertFalse(self.api.targets().enabled())
         self.assertIn('script\\battle\\mod\\wh3pt_battle.lua', self.files)
 
+    def test_auto_upgrade_switch_is_saved_cleared_and_undone(self):
+        self.api.click('tab_内政')
+        self.assertEqual(self.g.widgets['wh3pt_cmd_auto_upgrade'].text, '○ 关')
+        self.api.click('cmd_auto_upgrade')
+        self.assertTrue(self.api.auto_upgrade().enabled())
+        self.assertTrue(self.g.saved['wh3pt_player_auto_upgrade_enabled'])
+        self.assertEqual(self.g.widgets['wh3pt_cmd_auto_upgrade'].text, '● 开')
+        snap = self.api.snapshot()
+        self.api.clear(); self.g.flush()
+        self.assertFalse(self.api.auto_upgrade().enabled())
+        self.api.restore(snap, '测试'); self.g.flush()
+        self.assertTrue(self.api.auto_upgrade().enabled())
+
     def test_mortarch_building_command_is_player_scoped_and_dispatches_native_unlock(self):
         self.api.click('tab_军队')
         self.assertIsNone(self.g.widgets['wh3pt_cmd_mortarch_buildings'])
@@ -1713,9 +1726,17 @@ class InGameTests(unittest.TestCase):
         scale = self.api.layout().scale
         self.assertEqual(self.g.widgets['vslider'].properties.step_size, str(int(56 * scale + 0.5)))
 
+    def test_wheel_moves_one_elite_card_at_a_time(self):
+        self.api.click('open'); self.api.click('tab_精英'); self.api.click('strategy_filter')
+        scale = self.api.layout().scale
+        self.assertEqual(self.g.widgets['vslider'].properties.step_size, str(int(64 * scale + 0.5)))
+
     def test_no_page_controls_remain(self):
         self.api.click('open'); self.api.click('tab_战斗')
         for name in ('prev','next','page','sheet_prev','sheet_next','load_more'):
+            self.assertIsNone(self.g.widgets['wh3pt_'+name],name)
+        self.api.click('tab_精英')
+        for name in ('strategy_prev','strategy_next'):
             self.assertIsNone(self.g.widgets['wh3pt_'+name],name)
         self.assertEqual(self.g.widgets['wh3pt_list'].template,'ui/wh3pt/list')
         content=self.g.widgets['wh3pt_list_content']

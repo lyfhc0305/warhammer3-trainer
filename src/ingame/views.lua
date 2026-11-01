@@ -10,7 +10,7 @@ local function create_views(ctx)
     local literal_find = string.find_lua or string.find
     local CX, CW, ROW_W, RAIL_W, DESIGN_W, FRAME_INSET = K.CX, K.CW, K.ROW_W, K.RAIL_W, K.DESIGN_W, K.FRAME_INSET
     local PAGE_Y, LIST_Y, ROW_H, ROW_GAP, SECTION_H, CHIP_H = 62, 102, 52, 4, 30, 28
-    local ELITE_LIST_Y = 154
+    local ELITE_LIST_Y, ELITE_ROW_H = 154, 64
     local STAGGER = 8                      -- rows that fade in one after another
     local V = {}
     -- UI state. Model state (busy, selection, native pool) lives in M.
@@ -139,7 +139,7 @@ local function create_views(ctx)
         u:SetCanResizeWidth(true); u:SetCanResizeHeight(true); u:Resize(w, h)
     end
 
-    local function open_list(key, content_h, top, bottom)
+    local function open_list(key, content_h, top, bottom, step)
         top, bottom = top or LIST_Y, bottom or K.CONTENT_BOTTOM
         content_h = math.max(1, content_h)
         local x0, y0 = px(CX), px(top)
@@ -167,7 +167,7 @@ local function create_views(ctx)
             local _, arrow_h = (arrow or slider):Dimensions()
             local slider_w = slider:Dimensions()
             fit_part(slider, slider_w, h - 2 * (arrow and arrow_h or px(24)))
-            pcall(function() slider:SetProperty('step_size', tostring(px(ROW_H + ROW_GAP))) end)
+            pcall(function() slider:SetProperty('step_size', tostring(px(step or ROW_H + ROW_GAP))) end)
         end
         local content = K.make(box, 'list_content', 'ui/wh3pt/label', nil, ox + x0, oy + y0, row_w, px(content_h), '', 'active')
         if box.Layout then pcall(function() box:Layout() end) end
@@ -295,6 +295,10 @@ local function create_views(ctx)
             disabled = M.busy or not (mortarchs and mortarchs.supported())
         elseif cmd.id == 'mortarch_buildings' then
             disabled = M.busy or not (mortarchs and mortarchs.buildings_supported())
+        elseif cmd.id == 'auto_upgrade' then
+            local upgrades = ctx.auto_upgrade()
+            local on = upgrades and upgrades.enabled()
+            text, state = on and '● 开' or '○ 关', on and 'enabled' or 'active'
         end
         button(parent, 'cmd_' .. cmd.id, right - 56, ry + 13, 56, 26, text, state):SetDisabled(disabled)
         if cmd.toggle then
@@ -319,10 +323,11 @@ local function create_views(ctx)
     end
 
     local function command_signature(def)
-        local targets, mortarchs = ctx.targets(), ctx.mortarchs()
+        local targets, mortarchs, upgrades = ctx.targets(), ctx.mortarchs(), ctx.auto_upgrade()
         return table.concat({tostring(cmd_draft[def.id]), tostring(favourites[def.id]), tostring(M.busy),
             tostring(def.id == 'free_skills' and targets and targets.enabled()),
-            tostring(def.id == 'mortarchs' and mortarchs and mortarchs.enabled())}, '|')
+            tostring(def.id == 'mortarchs' and mortarchs and mortarchs.enabled()),
+            tostring(def.id == 'auto_upgrade' and upgrades and upgrades.enabled())}, '|')
     end
 
     local function feature_signature(def)
@@ -629,10 +634,10 @@ local function create_views(ctx)
         else
             local ids = {}
             for i, item in ipairs(matches_) do ids[i] = tostring(item.index) end
-            open_list('elite:' .. table.concat(ids, ','), #matches_ * 64 - ROW_GAP, ELITE_LIST_Y)
+            open_list('elite:' .. table.concat(ids, ','), #matches_ * ELITE_ROW_H - ROW_GAP, ELITE_LIST_Y, nil, ELITE_ROW_H)
             in_list(function()
                 for slot, item in ipairs(matches_) do
-                    local y = ELITE_LIST_Y + (slot - 1) * 64
+                    local y = ELITE_LIST_Y + (slot - 1) * ELITE_ROW_H
                     local signature = table.concat({tostring(M.native_enabled), tostring(M.native_selected[item.def.id]), tostring(M.busy)}, '|')
                     list_row('elite_' .. item.index, y, 60, signature, function(holder)
                         card(holder, 'strategy_card_' .. slot, CX, y, ROW_W, 60, '', 'active')

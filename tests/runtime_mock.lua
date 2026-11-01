@@ -180,6 +180,8 @@ local function make_char(cqi,wounded,garrison)
 end
 characters = {make_char(101,false,false), make_char(102,false,false), make_char(103,true,false), make_char(104,false,true)}
 function f:character_list() return list(characters) end
+regions = {}
+function f:region_list() return list(regions) end
 function f:effect_bundles()
     if fail_read then error('read unavailable') end
     local items={}; for _,b in pairs(bundles) do items[#items+1]=b end
@@ -188,6 +190,7 @@ end
 cm={}
 function cm:turn_number() return campaign_turn end
 function cm:is_multiplayer() return multiplayer end
+function cm:is_local_players_turn(force) return true end
 function cm:get_local_faction_name(force) return 'player' end
 function cm:get_faction(name) assert(name=='player'); return f end
 function cm:get_saved_value(key) return saved[key] end
