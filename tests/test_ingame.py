@@ -4,7 +4,7 @@ import unittest
 import xml.etree.ElementTree as ET
 from lupa.lua51 import LuaRuntime
 from tests import ROOT, SRC, REFERENCE
-from build_ingame import build_ingame, mock_font_lua
+from build_ingame import BUTTON_STATES, DESIGN, LABEL_STATES, PALETTE, build_ingame, mock_font_lua
 from trainer_core import GAME
 from game_compat import game_version, manifest_addons, read_manifest
 from pack_io import read_pack
@@ -949,7 +949,7 @@ class InGameTests(unittest.TestCase):
         self.assertEqual(self.g.widgets['wh3pt_tab_内政'].state,'ghost')
         self.assertEqual(self.g.widgets['wh3pt_toggle_ward'].text,'○ 关')
         self.g.widgets['wh3pt_input_ward'].SetStateText(self.g.widgets['wh3pt_input_ward'],'47.5')
-        self.api.click('toggle_ward'); self.g.flush(); self.g.flush_real()  # the flash settles
+        self.api.click('toggle_ward'); self.g.flush()
         self.assertEqual(self.api.read(self.feature('ward')),(True,47.5))
         self.assertEqual(self.g.widgets['wh3pt_card_ward'].state,'enabled')
         self.assertEqual(self.g.widgets['wh3pt_toggle_ward'].state,'enabled')
@@ -988,7 +988,7 @@ class InGameTests(unittest.TestCase):
         self.api.click('clear_filter')
         self.assertEqual(len(self.list_rows()),23)
         self.api.click('rail_count')
-        self.assertIn('正在生效',self.g.widgets['wh3pt_sheet_title'].text)
+        self.assertEqual(self.g.widgets['wh3pt_title'].text,'正在生效')
         self.api.click('sheet_close')
         self.api.clear(); self.g.flush()
         self.assertEqual(self.api.read(self.feature('ward')),(False,None))
@@ -1496,7 +1496,7 @@ class InGameTests(unittest.TestCase):
         self.assertEqual(len(self.g.logs),1)  # only the injected read-back failure
 
 
-    # ---- Safety, preview, undo and motion -------------------------------------
+    # ---- Safety, preview, undo and list stability ------------------------------
     def flush_real(self,times=8):
         for _ in range(times): self.g.flush_real()
 
@@ -1567,49 +1567,96 @@ class InGameTests(unittest.TestCase):
         self.assertNotIn('ward',self.list_rows())
         self.assertIn('ward',[w.id[len('wh3pt_act_row_'):] for w in self.live() if w.id.startswith('wh3pt_act_row_')])
 
-    def test_new_lists_fade_rows_in_one_after_another_and_rebuilt_rows_do_not(self):
-        self.api.click('open'); self.api.click('tab_战斗')
-        holders=sorted((w for w in self.live() if w.id.startswith('wh3pt_row_')),key=lambda w:w.y)
-        names=[list(w.animations.values())[0] for w in holders if getattr(w,'animations',None)]
-        self.assertEqual(names,['in_%d'%i for i in range(8)])
-        card=self.g.widgets['wh3pt_card_healing']
-        self.assertEqual(list(card.animations.values()),['in_1'])  # the section title took in_0
-        self.api.click('toggle_vigour'); self.g.flush()
-        rebuilt=self.g.widgets['wh3pt_card_vigour']
-        self.assertIsNone(getattr(rebuilt,'animations',None))
-        self.assertEqual(rebuilt.state,'flash')  # a row that just came on glows once
-        self.flush_real()
-        self.assertEqual(rebuilt.state,'enabled')
-        self.api.click('tab_内政'); self.api.click('tab_战斗')
-        self.assertEqual(list(self.g.widgets['wh3pt_card_healing'].animations.values()),['in_1'])
-        self.assertIsNone(getattr(self.g.widgets['wh3pt_card_vigour'],'animations',None))  # only the first eight rows stagger
+    def assert_rows_stack(self):
+        """List rows sit one under the other: none overlap, none leave a hole."""
+        rows=sorted((w for w in self.live() if w.id.startswith('wh3pt_row_')),key=lambda w:w.y)
+        for upper,lower in zip(rows,rows[1:]):
+            self.assertIn(lower.y-upper.y-upper.h,range(0,7),msg=upper.id+' / '+lower.id)
 
-    def test_opening_fades_the_panel_in_and_a_rebuilt_panel_is_left_alone(self):
-        self.api.click('open')
-        panel=self.g.widgets['wh3pt_panel']
-        self.assertEqual(panel.opacity,50)
-        self.g.flush_real()
-        self.assertEqual(panel.opacity,90)
-        self.api.click('collapse')  # rebuilt: the pending steps must not touch the old panel
-        self.flush_real()
-        self.assertEqual(panel.opacity,90)
-        self.assertIsNone(self.g.widgets['wh3pt_panel'].opacity)
-        self.api.click('collapse_rail'); self.api.click('close'); self.api.click('open')
-        self.flush_real()
-        self.assertEqual(self.g.widgets['wh3pt_panel'].opacity,255)
-        self.assertEqual(list(self.g.stale_ui_calls.values()),[])
-
-    def test_busy_read_back_pulses_the_status_dot(self):
+    def test_a_row_that_grows_moves_the_rows_below_without_rebuilding_them(self):
         self.api.click('open'); self.api.click('tab_内政')
-        self.api.click('toggle_order')
-        dot=self.g.widgets['wh3pt_status_dot']
-        self.assertEqual(dot.state,'busy_dot')
-        self.assertTrue(dot.pulsing)
-        self.g.flush()
-        self.assertEqual(dot.state,'ok_dot')
-        self.assertFalse(dot.pulsing)
+        self.api.click('toggle_order'); self.g.flush()
+        below=self.g.widgets['wh3pt_row_diplomacy']
+        card=self.g.widgets['wh3pt_card_diplomacy']
+        top,card_top=below.y,card.y
+        self.api.click('plus_order')
+        self.assertEqual(self.g.widgets['wh3pt_row_order'].h,80)
+        self.assertEqual(self.g.widgets['wh3pt_row_diplomacy'].seq,below.seq)
+        self.assertEqual((below.y,card.y),(top+28,card_top+28))
+        self.assert_rows_stack()
+        self.api.click('revert_order')
+        self.assertEqual((below.y,card.y),(top,card_top))
+        self.assert_rows_stack()
 
-    def test_templates_carry_hover_transitions_and_entrance_animations(self):
+    def test_a_moved_row_lands_where_the_list_has_scrolled_to(self):
+        self.api.click('open'); self.api.click('tab_内政')
+        self.api.click('toggle_order'); self.g.flush()
+        content=self.g.widgets['wh3pt_list_content']
+        content.MoveTo(content,content.x,content.y-150)
+        self.api.click('plus_order')
+        row=self.g.widgets['wh3pt_row_order']
+        self.assertEqual(self.g.widgets['wh3pt_row_diplomacy'].y,row.y+row.h+4)
+
+    def test_overview_keeps_its_list_while_features_come_and_go(self):
+        self.api.click('open'); self.api.click('tab_内政'); self.api.click('fav_order'); self.api.click('tab_总览')
+        view=self.g.widgets['wh3pt_list'].seq
+        gold=self.g.widgets['wh3pt_row_home_gold'].seq
+        self.api.click('toggle_order'); self.g.flush()
+        self.assertIn('act_order',self.list_rows())
+        self.assert_rows_stack()
+        self.api.click('off_order'); self.g.flush()
+        self.assertNotIn('act_order',self.list_rows())
+        self.assert_rows_stack()
+        self.api.click('fav_order')
+        self.assertNotIn('order',self.list_rows())
+        self.assert_rows_stack()
+        self.assertEqual(self.g.widgets['wh3pt_list'].seq,view)
+        self.assertEqual(self.g.widgets['wh3pt_row_home_gold'].seq,gold)
+
+    def test_unstarring_under_the_favourites_filter_keeps_the_list(self):
+        self.api.click('open'); self.api.click('tab_战斗')
+        self.api.click('fav_healing'); self.api.click('fav_ward'); self.api.click('favourites_only')
+        view=self.g.widgets['wh3pt_list'].seq
+        self.api.click('fav_healing')
+        self.assertEqual(self.g.widgets['wh3pt_list'].seq,view)
+        self.assertEqual(self.list_rows()-{r for r in self.list_rows() if r.startswith('section_')},{'ward'})
+        self.assert_rows_stack()
+        self.api.click('favourites_only')  # a different question gets a fresh list
+        self.assertNotEqual(self.g.widgets['wh3pt_list'].seq,view)
+
+    def test_sheet_closes_up_when_a_row_is_switched_off(self):
+        for key,value in (('order','50'),('growth','500'),('ward','33')):
+            self.api.apply(key,True,value); self.g.flush()
+        self.api.click('open'); self.api.click('rail_count')
+        self.assertEqual(self.g.widgets['wh3pt_sheet_count'].text,'共 3 项')
+        self.assertEqual(self.g.widgets['wh3pt_sheet_close'].text,'‹ 返回')
+        view=self.g.widgets['wh3pt_list'].seq
+        rows=sorted((w for w in self.live() if w.id.startswith('wh3pt_row_')),key=lambda w:w.y)
+        top=rows[0].y
+        self.api.click('off_'+rows[0].id[len('wh3pt_row_sheet_'):]); self.g.flush()
+        self.assertEqual(self.g.widgets['wh3pt_list'].seq,view)
+        self.assertEqual(self.g.widgets['wh3pt_sheet_count'].text,'共 2 项')
+        self.assertEqual(rows[1].y,top)
+        self.assert_rows_stack()
+
+    def test_a_quick_read_back_leaves_the_status_line_alone_and_a_long_wait_shows(self):
+        self.api.click('open'); self.api.click('tab_内政')
+        status,dot=self.g.widgets['wh3pt_status'],self.g.widgets['wh3pt_status_dot']
+        before=status.text
+        self.api.click('toggle_order')
+        self.assertEqual((status.text,dot.state),(before,'ok_dot'))
+        self.g.flush(); self.g.flush_real()  # the note finds the read-back done
+        self.assertIn('已生效',status.text)
+        self.assertEqual(dot.state,'ok_dot')
+        self.api.click('toggle_growth')
+        self.g.flush_real()  # campaign time has stopped: the wait is explained
+        self.assertIn('等待游戏回读',status.text)
+        self.assertEqual(dot.state,'busy_dot')
+        self.g.flush()
+        self.assertIn('已生效',status.text)
+        self.assertEqual(dot.state,'ok_dot')
+
+    def test_templates_carry_hover_transitions_and_no_animations(self):
         root=ET.fromstring(self.files['ui\\wh3pt\\button.twui.xml'])
         button=next(c for c in root.find('components') if c.tag=='button')
         states={s.get('name'):s for s in button.find('states')}
@@ -1620,16 +1667,22 @@ class InGameTests(unittest.TestCase):
         back={t.get('index'):guid[t.get('transition_m_target_state')] for t in states['selected_hover'].find('transitionmap')}
         self.assertEqual(back,{'1':'selected','2':'selected_down'})
         self.assertIsNone(states['inactive'].find('transitionmap'))
-        animations={a.get('id'):a for a in button.find('animations')}
-        self.assertEqual(sorted(animations),['in_%d'%i for i in range(8)])
-        frames=list(animations['in_3'].find('frames'))
-        self.assertEqual([f.get('interpolationtime') for f in frames],['0','90','220'])
-        self.assertTrue(all(f.get('interpolationpropertymask')=='64' for f in frames))
-        self.assertIsNone(frames[-1].get('targetmetrics_m_colour'))
-        for kind in ('card','label'):
+        for kind in ('button','card','label','icon'):
             root=ET.fromstring(self.files['ui\\wh3pt\\'+kind+'.twui.xml'])
-            component=next(c for c in root.find('components') if c.tag==kind)
-            self.assertEqual(len(component.find('animations')),8)
+            self.assertIsNone(root.find('.//animations'),kind)
+
+    def test_secondary_text_reads_on_every_surface_and_disabled_text_stays_dimmer(self):
+        def luminance(colour):
+            channels=[int(colour[i:i+2],16)/255 for i in (1,3,5)]
+            r,g,b=[c/12.92 if c<=.03928 else ((c+.055)/1.055)**2.4 for c in channels]
+            return .2126*r+.7152*g+.0722*b
+        def contrast(text,surface):
+            return (luminance(text)+.05)/(luminance(surface)+.05)
+        for surface in ('Background','Side','Surface','Raise','AccentFill'):
+            self.assertGreaterEqual(contrast(DESIGN['Hint'],DESIGN[surface]),4.5,surface)
+        for state in ('hint','quiet','quiet_right','quiet_center'):
+            self.assertEqual(LABEL_STATES[state][0],PALETTE['Hint'])
+        self.assertEqual(BUTTON_STATES['inactive'][1],PALETTE['Quiet'])
 
     def test_taller_screens_get_a_taller_panel_up_to_the_cap(self):
         self.api.click('open')
@@ -1719,10 +1772,10 @@ class InGameTests(unittest.TestCase):
         self.api.click('open')
         self.assertIn('查看全部',self.g.widgets['wh3pt_sheet_open'].text)
         self.api.click('sheet_open')
-        self.assertIn('35 项',self.g.widgets['wh3pt_sheet_title'].text)
+        self.assertIn('35 项',self.g.widgets['wh3pt_sheet_count'].text)
         self.assertEqual(len(self.list_rows()),35)
         self.api.click('sheet_close')
-        self.assertTrue(self.g.widgets['wh3pt_sheet_title'].dead)
+        self.assertTrue(self.g.widgets['wh3pt_sheet_count'].dead)
         self.assertFalse(any(r.startswith('sheet_') for r in self.list_rows()))
 
     # ---- Scrolling and dragging --------------------------------------------------
@@ -1770,7 +1823,7 @@ class InGameTests(unittest.TestCase):
         self.api.click('open'); self.api.click('tab_战斗')
         view=self.g.widgets['wh3pt_list'].seq
         other=self.g.widgets['wh3pt_card_attack'].seq
-        self.api.click('toggle_ward'); self.g.flush(); self.g.flush_real()
+        self.api.click('toggle_ward'); self.g.flush()
         self.assertEqual(self.g.widgets['wh3pt_list'].seq,view)
         self.assertEqual(self.g.widgets['wh3pt_card_attack'].seq,other)
         self.assertEqual(self.g.widgets['wh3pt_card_ward'].state,'enabled')

@@ -119,20 +119,6 @@ local function create_kit(env)
         if u.SetTooltipText then pcall(function() u:SetTooltipText(text, true) end) end
     end
 
-    -- Engine motion. Every call is optional: a build without the method, or a
-    -- template without the animation, simply shows the final state.
-    function K.animate(u, name)
-        if u and u.TriggerAnimation then pcall(function() u:TriggerAnimation(name) end) end
-    end
-    function K.opacity(u, value)
-        if u and u.SetOpacity then pcall(function() u:SetOpacity(value, true) end) end
-    end
-    function K.pulse(u, on)
-        if not u then return end
-        if on and u.StartPulseHighlight then pcall(function() u:StartPulseHighlight(2) end)
-        elseif not on and u.StopPulseHighlight then pcall(function() u:StopPulseHighlight() end) end
-    end
-
     -- width_ok, height_ok, measured_width for the text currently set.
     local function check(u, m, state, text, inner_w)
         local w, h, lines = measure(u)
@@ -323,19 +309,6 @@ local function create_kit(env)
     function K.scale_label()
         if K.pref > 0 then return '缩放 ' .. tostring(math.floor(K.pref * 100 + 0.5)) .. '%' end
         return '缩放 自动'
-    end
-
-    -- Walk a subtree and trigger one animation on every component.
-    function K.animate_tree(u, name, depth)
-        depth = depth or 0
-        if not u or depth > 6 then return end
-        K.animate(u, name)
-        local ok, count = pcall(function() return u:ChildCount() end)
-        if not ok or type(count) ~= 'number' then return end
-        for i = 0, count - 1 do
-            local child_ok, child = pcall(function() return UIComponent(u:Find(i)) end)
-            if child_ok and child then K.animate_tree(child, name, depth + 1) end
-        end
     end
 
     return K

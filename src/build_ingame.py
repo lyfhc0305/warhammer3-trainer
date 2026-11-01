@@ -33,11 +33,11 @@ DESIGN = {
     'LineStrong': '#4A4E57',
     'TextMain': '#F2F1EC',
     'Muted': '#A6A49C',
-    'Quiet': '#6F6E69',
+    'Hint': '#8C8B85',    # small secondary text: 4.5:1 on cards and gold rows
+    'Quiet': '#6F6E69',   # disabled text only
     'Accent': '#E6B45A',
     'AccentInk': '#FFD98A',
     'AccentFill': '#2A2419',
-    'AccentFlash': '#4A3C1E',
     'AccentLine': '#B28C4B',
     'PrimaryInk': '#1B1207',
     'Danger': '#FF8F85',
@@ -145,7 +145,6 @@ CARD_STATES = {
     'raise': (PALETTE['Raise'], PALETTE['LineStrong'], PALETTE['TextMain']),
     'enabled': (PALETTE['AccentFill'], PALETTE['AccentLine'], PALETTE['AccentInk']),
     'accent': (PALETTE['AccentFill'], PALETTE['AccentLine'], PALETTE['AccentInk']),
-    'flash': (PALETTE['AccentFlash'], PALETTE['Accent'], PALETTE['AccentInk']),
     'logo': (PALETTE['Side'], None, PALETTE['Accent']),
     'divider': (PALETTE['Divider'], None, PALETTE['Quiet']),
     'ok_dot': (PALETTE['Ok'], None, PALETTE['Ok']),
@@ -165,9 +164,9 @@ _LABEL_BASE = {
     'value': (PALETTE['AccentInk'], '18', 'Left'),
     'section': (PALETTE['Muted'], '12', 'Left'),
     'muted': (PALETTE['Muted'], '12', 'Left'),
-    'quiet': (PALETTE['Quiet'], '12', 'Left'),
-    'quiet_right': (PALETTE['Quiet'], '12', 'Right'),
-    'quiet_center': (PALETTE['Quiet'], '12', 'Center'),
+    'quiet': (PALETTE['Hint'], '12', 'Left'),
+    'quiet_right': (PALETTE['Hint'], '12', 'Right'),
+    'quiet_center': (PALETTE['Hint'], '12', 'Center'),
     'accent': (PALETTE['AccentInk'], '14', 'Left'),
     'accent_center': (PALETTE['AccentInk'], '12', 'Center'),
     'accent_right': (PALETTE['AccentInk'], '14', 'Right'),
@@ -182,26 +181,7 @@ LABEL_STATES.update({
 })
 # Calibration probe: panel.lua expects exactly 14px for its 100% reference.
 LABEL_STATES['probe'] = (PALETTE['TextMain'], '14', 'Left')
-LABEL_STATES['hint'] = (PALETTE['Quiet'], '12', 'Left')
-
-# Entrance animations: a new list fades its rows in one after another. Each
-# in_k holds transparent for k steps, then fades over FADE_MS. Colour only, so a
-# build that ignores them shows the finished layout.
-STAGGER_STEPS, STAGGER_MS, FADE_MS = 8, 30, 220
-
-
-def entrance_animations():
-    result = {}
-    for k in range(STAGGER_STEPS):
-        frames = [dict(interpolationtime='0', interpolationpropertymask=TRANSITION_MASK, targetmetrics_m_colour='#FFFFFF00')]
-        if k:
-            frames.append(dict(interpolationtime=str(k * STAGGER_MS), interpolationpropertymask=TRANSITION_MASK,
-                               targetmetrics_m_colour='#FFFFFF00'))
-        frames.append(dict(interpolationtime=str(FADE_MS), interpolationpropertymask=TRANSITION_MASK,
-                           easing_curve_type='Quadratic Out'))
-        result['in_%d' % k] = frames
-    return result
-
+LABEL_STATES['hint'] = (PALETTE['Hint'], '12', 'Left')
 
 HINTS = {
     'vigour': '不累积疲劳，开战后清除开局疲劳',
@@ -320,7 +300,7 @@ def _state_layers(kind, state):
 
 
 def ui_template(kind):
-    """Layout with 9-slice surfaces, multi-state typography, hover transitions and entrance animations."""
+    """Layout with 9-slice surfaces, multi-state typography and hover transitions."""
     def guid(name):
         return str(uuid.uuid5(uuid.NAMESPACE_URL, 'wh3pt/' + kind + '/' + name)).upper()
 
@@ -400,13 +380,6 @@ def ui_template(kind):
                 texthalign=halign, texthbehaviour='Never split',
                 font_m_size=font_size, font_m_colour=text_colour, font_m_leading='2', fontcat_name='body_14',
             )
-        if is_target:
-            animations = ET.SubElement(node, 'animations')
-            for anim_name, frames in entrance_animations().items():
-                anim = ET.SubElement(animations, anim_name, id=anim_name)
-                block = ET.SubElement(anim, 'frames')
-                for frame in frames:
-                    ET.SubElement(block, 'frame', **frame)
     return ET.tostring(layout, encoding='utf-8', xml_declaration=True)
 
 

@@ -172,6 +172,17 @@ local function message(text, is_error)
     if views then views.show_status() end
 end
 
+-- The usual read-back takes about 0.1 s, too short to read, so the status line
+-- only changes once a wait has lasted long enough to need explaining. Runs on
+-- real time: campaign time stops in the dialogs that make a wait long.
+local function note_wait(text)
+    local note = {}
+    M.wait_note = note
+    views.later(300, function()
+        if M.busy and M.wait_note == note then pcall(message, text) end
+    end)
+end
+
 -- Keep the footer readable: drop the chunk/line prefix and traceback (the full
 -- error still goes to the mod log).
 local function short_error(err)
@@ -278,7 +289,7 @@ local function apply(id, enabled, raw)
         return
     end
     M.busy = true
-    message('等待游戏回读……')
+    note_wait('等待游戏回读……')
     local function finish_apply()
         if def.income and income_actions.pending() then
             player_callback(finish_apply, 0.2)
@@ -316,7 +327,7 @@ local function apply_preset(pairs_list, title)
         end
     end
     M.busy = true
-    message('正在应用' .. title .. '……')
+    note_wait('正在应用' .. title .. '……')
     local function finish()
         M.busy = false
         guarded(function()
@@ -799,7 +810,7 @@ local function restore(snap, title)
     end
     if auto_upgrade and snap.auto_upgrade ~= auto_upgrade.enabled() then auto_upgrade.toggle(snap.auto_upgrade) end
     M.busy = true
-    message('正在撤销' .. title .. '……')
+    note_wait('正在撤销' .. title .. '……')
     when_settled(function()
         M.busy = false
         guarded(function()

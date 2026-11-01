@@ -11,28 +11,27 @@ local function create_views(ctx)
     local CX, CW, ROW_W, RAIL_W, DESIGN_W, FRAME_INSET = K.CX, K.CW, K.ROW_W, K.RAIL_W, K.DESIGN_W, K.FRAME_INSET
     local PAGE_Y, LIST_Y, ROW_H, ROW_GAP, SECTION_H, CHIP_H = 62, 102, 52, 4, 30, 28
     local ELITE_LIST_Y, ELITE_ROW_H = 154, 64
-    local STAGGER = 8                      -- rows that fade in one after another
     local V = {}
     -- UI state. Model state (busy, selection, native pool) lives in M.
     local ui = {
         group = '总览', query = '', search_text = '', search_open = false, only_favourites = false,
         visible = false, collapsed = false, sheet = false, overlay = nil,
         strategic_sort = 'recruitment_cost', strategic_category = 'all', own_regiments = true,
-        home_resource_page = 1, armed = nil, undo = nil, fresh = false, animate_open = false,
+        home_resource_page = 1, armed = nil, undo = nil,
     }
     V.ui = ui
     local panel, launcher, rows_parent, overlay_parent, title_ui, rail_count_ui, status_ui, status_dot_ui, list_ui, search
     local current_rows, strategic_inputs, strategic_draft = {}, {}, {}
-    local last_lit, fresh_rows, gen, timer_seq = {}, 0, 0, 0
+    local gen, timer_seq = 0, 0
     local homes = {}
-    local pulsing = false
 
-    -- Real-time timers for motion and countdowns: campaign time pauses in dialogs.
+    -- Real-time timers for countdowns: campaign time pauses in dialogs.
     local function later(ms, fn)
         timer_seq = timer_seq + 1
         local name = PREFIX .. 'ui_timer_' .. timer_seq
         if cm.real_callback then cm:real_callback(fn, ms, name) else cm:callback(fn, ms / 1000) end
     end
+    V.later = later
 
     local function group_digits(n)
         local s = tostring(math.floor((tonumber(n) or 0) + 0.5))
@@ -122,9 +121,11 @@ local function create_views(ctx)
 
     -- ------------------------------------------------------------------
     -- Native scroll list. ui/wh3pt/list is the engine's Listview: it clips,
-    -- scrolls and owns the wheel; the panel only fills it. It survives renders
-    -- while its key is unchanged, which keeps the scroll position, and a row is
-    -- rebuilt only when its signature changes.
+    -- scrolls and owns the wheel; the panel only fills it. The key names what
+    -- the list shows, not its rows: the list survives renders while the key is
+    -- unchanged, which keeps the scroll position. Within it a row is rebuilt
+    -- only when its signature changes, moves when rows above it change height,
+    -- and goes when a render no longer draws it.
     -- ------------------------------------------------------------------
     local function close_list()
         if list_ui then list_ui.view:Destroy(); list_ui = nil end
@@ -173,35 +174,42 @@ local function create_views(ctx)
         if box.Layout then pcall(function() box:Layout() end) end
         view:PropagatePriority(200)
         list_ui = {key = key, view = view, box = box, content = content, content_h = content_h, top = top, rows = {}}
-        ui.fresh, fresh_rows = true, 0
     end
 
-    -- Draws one list row at design position y unless it is unchanged. A new
-    -- list fades its first rows in one after another.
+    -- Places one list row at design position y: an unchanged row only moves there.
     local function list_row(id, y, h, signature, draw)
         local entry = list_ui.rows[id]
         if not entry or entry.signature ~= signature then
             if entry then entry.holder:Destroy() end
             local holder = label(list_ui.content, 'row_' .. id, CX, y, ROW_W, h, '')
-            entry = {signature = signature, holder = holder, row = draw(holder)}
+            entry = {signature = signature, holder = holder, y = y, row = draw(holder)}
             list_ui.rows[id] = entry
-            if ui.fresh and fresh_rows < STAGGER then
-                K.animate_tree(holder, 'in_' .. fresh_rows)
-                fresh_rows = fresh_rows + 1
-            end
+        elseif entry.y ~= y then
+            local ox, oy = K.origin()
+            entry.holder:MoveTo(ox + px(CX), oy + px(y))
+            entry.y = y
         end
+        list_ui.drawn[id] = true
         return entry.row
     end
 
     -- Runs fn with the design origin moved so that the list's top maps to the
-    -- top of the scrolled content; rows then use the same coordinates as everything else.
+    -- top of the scrolled content; rows then use the same coordinates as everything
+    -- else. Rows fn did not draw have left the list.
     local function in_list(fn)
         local cx, cy = list_ui.content:Position()
         local saved_x, saved_y = K.origin()
         K.set_origin(cx - px(CX), cy - px(list_ui.top))
+        list_ui.drawn = {}
         local ok, err = pcall(fn)
         K.set_origin(saved_x, saved_y)
         if not ok then error(err, 0) end
+        for id, entry in pairs(list_ui.rows) do
+            if not list_ui.drawn[id] then
+                entry.holder:Destroy()
+                list_ui.rows[id] = nil
+            end
+        end
     end
 
     -- ------------------------------------------------------------------
@@ -227,22 +235,11 @@ local function create_views(ctx)
         label(parent, 'info_' .. def.id, CX + 36, ry + 27, width, 20, detail, 'hint')
     end
 
-    local function flash_card(id, u)
-        K.set_state(u, 'flash')
-        local token = gen
-        later(380, function()
-            local entry = list_ui and list_ui.rows[id]
-            if token == gen and entry and entry.row and entry.row.card == u then K.set_state(u, 'enabled') end
-        end)
-    end
-
     local function draw_row(parent, def, ry)
         local ok, lit, actual, changed = row_state(def)
         local row = {def = def}
         local height = row_height(def, changed)
-        row.card = card(parent, 'card_' .. def.id, CX, ry, ROW_W, height, '', lit and 'enabled' or 'active')
-        if lit and last_lit[def.id] == false and not ui.fresh then flash_card(def.id, row.card) end
-        last_lit[def.id] = lit and true or false
+        card(parent, 'card_' .. def.id, CX, ry, ROW_W, height, '', lit and 'enabled' or 'active')
         local right = CX + ROW_W - 8
         button(parent, 'toggle_' .. def.id, right - 56, ry + 13, 56, 26,
             not ok and '异常' or lit and '● 开' or '○ 关',
@@ -282,7 +279,7 @@ local function create_views(ctx)
 
     local function draw_command_row(parent, cmd, ry)
         local row = {def = cmd, is_cmd = true}
-        row.card = card(parent, 'card_cmd_' .. cmd.id, CX, ry, ROW_W, ROW_H, '', 'active')
+        card(parent, 'card_cmd_' .. cmd.id, CX, ry, ROW_W, ROW_H, '', 'active')
         local right = CX + ROW_W - 8
         local text, disabled, state = cmd.btn, M.busy, 'accent'
         local targets, mortarchs = ctx.targets(), ctx.mortarchs()
@@ -361,7 +358,7 @@ local function create_views(ctx)
     -- favourites filter or a search is on.
     -- ------------------------------------------------------------------
     local function draw_catalog()
-        local entries, ids, total = {}, {}, 0
+        local entries, total = {}, 0
         local cross = ui.query ~= '' or ui.only_favourites
         for _, page in ipairs(PAGES) do
             for index, block in ipairs((cross or ui.group == page.name) and page.sections or {}) do
@@ -371,13 +368,11 @@ local function create_views(ctx)
                     if not mortarch_hidden(def) and matches(def) then
                         if title then
                             entries[#entries + 1] = title
-                            ids[#ids + 1] = title.id
                             total = total + SECTION_H
                             title = nil
                         end
                         local entry = entry_for(def)
                         entries[#entries + 1] = entry
-                        ids[#ids + 1] = def.id
                         total = total + entry.h + ROW_GAP
                     end
                 end
@@ -393,7 +388,7 @@ local function create_views(ctx)
             end
             return
         end
-        open_list(table.concat(ids, ','), total - ROW_GAP)
+        open_list(table.concat({'catalog', ui.group, ui.query, tostring(ui.only_favourites)}, '|'), total - ROW_GAP)
         in_list(function()
             local y = LIST_Y
             for _, entry in ipairs(entries) do
@@ -534,9 +529,9 @@ local function create_views(ctx)
                 button(holder, 'sheet_open', CX, y, ROW_W, 32, '查看全部 ' .. tostring(#act_list) .. ' 项  ›', 'ghost_page')
             end)
         end
-        local total, ids = 0, {}
-        for _, b in ipairs(blocks) do total = total + b.h; ids[#ids + 1] = b.id end
-        open_list('home:' .. table.concat(ids, ','), total, PAGE_Y)
+        local total = 0
+        for _, b in ipairs(blocks) do total = total + b.h end
+        open_list('home', total, PAGE_Y)
         in_list(function()
             local y = PAGE_Y
             for _, b in ipairs(blocks) do
@@ -556,8 +551,8 @@ local function create_views(ctx)
     -- Sheet: everything in effect, from any page, with the two-step clear.
     -- ------------------------------------------------------------------
     local function draw_active_sheet(act_list)
-        label(rows_parent, 'sheet_title', CX, 60, CW - 46, 32, '正在生效 · ' .. tostring(#act_list) .. ' 项', 'title')
-        button(rows_parent, 'sheet_close', CX + CW - 34, 62, 34, 28, '×', 'active')
+        button(rows_parent, 'sheet_close', CX, 62, 72, 28, '‹ 返回', 'chip')
+        label(rows_parent, 'sheet_count', CX + 80, 62, CW - 80, 28, '共 ' .. tostring(#act_list) .. ' 项', 'quiet_right')
         local bottom = K.CONTENT_BOTTOM - 44
         if ui.armed then
             button(rows_parent, 'clear', CX, bottom + 8, CW, 32, '确认全关 · ' .. tostring(ui.armed.left), 'danger_solid'):SetDisabled(M.busy)
@@ -569,9 +564,7 @@ local function create_views(ctx)
             label(rows_parent, 'sheet_empty', CX + 16, LIST_Y + 60, CW - 32, 24, '当前没有生效的修改', 'quiet_center')
             return
         end
-        local ids = {}
-        for i, it in ipairs(act_list) do ids[i] = it.def.id end
-        open_list('sheet:' .. table.concat(ids, ','), #act_list * 38 - 6, LIST_Y, bottom)
+        open_list('sheet', #act_list * 38 - 6, LIST_Y, bottom)
         in_list(function()
             for i, it in ipairs(act_list) do
                 local y = LIST_Y + (i - 1) * 38
@@ -775,7 +768,6 @@ local function create_views(ctx)
         end
         if status_dot_ui then
             K.set_state(status_dot_ui, M.busy and 'busy_dot' or (M.status_error and 'danger_dot' or 'ok_dot'))
-            if M.busy ~= pulsing then K.pulse(status_dot_ui, M.busy); pulsing = M.busy end
         end
 
         rows_parent = label(panel, 'rows', CX, 56, CW, K.FOOTER_Y - 4 - 56, '')
@@ -795,7 +787,6 @@ local function create_views(ctx)
         if ui.overlay == 'preset_campaign' then draw_preset_overlay('campaign')
         elseif ui.overlay == 'preset_battle' then draw_preset_overlay('battle')
         elseif ui.overlay == 'scale' then draw_scale_overlay() end
-        ui.fresh = false
     end
     V.render = render
 
@@ -826,7 +817,6 @@ local function create_views(ctx)
         end
         if status_dot_ui then
             K.set_state(status_dot_ui, M.busy and 'busy_dot' or (M.status_error and 'danger_dot' or 'ok_dot'))
-            if M.busy ~= pulsing then K.pulse(status_dot_ui, M.busy); pulsing = M.busy end
         end
     end
 
@@ -882,23 +872,6 @@ local function create_views(ctx)
         return x, y
     end
 
-    -- Opening fades the panel in over a few real-time steps; a panel rebuilt
-    -- or closed in the meantime is left alone.
-    local function fade_in(u)
-        if not u.SetOpacity or not cm.real_callback then return end
-        local token = gen
-        local steps = {90, 140, 190, 230, 255}
-        K.opacity(u, 50)
-        local function step(i)
-            later(30, function()
-                if token ~= gen or not ui.visible then return end
-                K.opacity(u, steps[i])
-                if i < #steps then step(i + 1) end
-            end)
-        end
-        step(1)
-    end
-
     local function create_ui()
         local root = core:get_ui_root()
         if panel then left_home(panel, 'panel'); V.capture(); panel:Destroy() end
@@ -906,7 +879,7 @@ local function create_views(ctx)
         gen = gen + 1
         panel, launcher, rows_parent, overlay_parent, title_ui, rail_count_ui = nil, nil, nil, nil, nil, nil
         search, status_ui, status_dot_ui, list_ui = nil, nil, nil, nil
-        current_rows, strategic_inputs, pulsing = {}, {}, false
+        current_rows, strategic_inputs = {}, {}
         for k in pairs(ctx.controls) do ctx.controls[k] = nil end
         local rw, rh = K.compute_scale(root)
         local panel_h = ui.collapsed and K.RAIL_H or K.PANEL_H
@@ -947,8 +920,6 @@ local function create_views(ctx)
         render()
         panel:PropagatePriority(200)
         panel:SetVisible(ui.visible)
-        if ui.visible and ui.animate_open then fade_in(panel) end
-        ui.animate_open = false
     end
     V.create_ui = create_ui
 
@@ -1009,7 +980,7 @@ local function create_views(ctx)
         end
         if id == 'open' then
             if ui.visible then close_panel() else
-                ui.visible, ui.sheet, ui.animate_open = true, false, true
+                ui.visible, ui.sheet = true, false
                 create_ui()
             end
             return
@@ -1194,7 +1165,6 @@ local function create_views(ctx)
         ui.home_resource_page, ui.own_regiments = 1, true
         ui.strategic_category, ui.overlay, ui.sheet, ui.armed, ui.undo = 'all', nil, false, nil, nil
         strategic_inputs, strategic_draft, current_rows, search = {}, {}, {}, nil
-        last_lit = {}
         for index, def in ipairs(STRATEGIC.resources) do
             strategic_draft['resource_' .. index] = cm:get_saved_value(ctx.setting('resource_' .. def.id, 'target'))
         end
