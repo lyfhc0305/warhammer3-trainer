@@ -1,3 +1,5 @@
+from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import patch
 from lupa.lua51 import LuaRuntime
@@ -36,6 +38,8 @@ UNITS = {
                 ap=330, interval=4, splash=5),
     'dragon': row(['melee', 'high', 'large'], 2500, 120, vs_large=20, attack=64, defence=50, charge=45, hp=9416,
                   damage=145, ap=435, interval=3.8, splash=6),
+    'rider_hero': row(['melee', 'flanker', 'shock', 'high', 'large'], 1300, 90, attack=60, defence=45, charge=50,
+                      hp=4000, damage=120, ap=250, interval=4, splash=4),
     'giant': row(['melee', 'large'], 1400, 50, attack=65, defence=30, charge=40, hp=12612, damage=200, ap=500,
                  interval=4, splash=7),
     'plate': row(['melee'], 900, 120, attack=46, defence=60, charge=26, hp=123, damage=34, ap=14, interval=3.8),
@@ -80,7 +84,8 @@ class GeneralTests(unittest.TestCase):
         self.lua = LuaRuntime(unpack_returned_tuples=True)
         self.lua.execute((ROOT / 'tests/battlefield_mock.lua').read_text(encoding='utf-8'))
         self.lua.execute((SRC / 'ingame/general.lua').read_text(encoding='utf-8')
-                         + '\nNEW_GENERAL = new_general; TUNE = GENERAL_TUNE; EDGE = general_edge\n')
+                         + '\nNEW_GENERAL = new_general; TUNE = GENERAL_TUNE; EDGE = general_edge\n'
+                         + 'JOURNAL = GENERAL_JOURNAL; NEW_JOURNAL = new_general_journal\n')
         self.g = self.lua.globals()
         self.g.DATA = self.table({'flags': FLAGS, 'uses': list(USES), 'units': UNITS, 'abilities': ABILITIES})
         self.g.env_logs = self.lua.table()
@@ -234,7 +239,7 @@ class GeneralTests(unittest.TestCase):
         self.go()
         self.run_ticks(1, walk=False)
         self.g.selected_ids[unit.id] = True
-        self.g.clock = self.g.clock + 500
+        self.g.clock = self.g.clock + 700
         self.general.player_order()
         before = len(self.g.order_log)
         self.g.orders[unit.id] = None
@@ -258,21 +263,53 @@ class GeneralTests(unittest.TestCase):
         self.run_ticks(1, walk=False)
         self.assertFalse(self.general.paused(unit.id))
 
-    def test_orders_the_engine_echoes_later_are_learned_and_not_the_players(self):
+    def test_each_order_of_ours_comes_back_once_and_is_not_the_players(self):
+        unit = self.player('swords', 0, 0)
+        self.player('swords', 30, 0)
+        self.enemy('swords', 0, 50)
+        self.go()
+        self.g.selected_ids[unit.id] = True
+        self.run_ticks(1, walk=False)   # one order each
+        self.g.clock = self.g.clock + 300
+        self.general.player_order()
+        self.general.player_order()
+        self.assertFalse(self.general.paused(unit.id))
+        self.general.player_order()     # nothing of ours is out any more: the player
+        self.assertTrue(self.general.paused(unit.id))
+
+    def test_abilities_come_back_like_orders(self):
+        wizard = self.player('wizard', 0, 0, men=1, initial=1, magic=True)
+        self.give(wizard, 'bolt')
+        self.enemy('lord', 0, 200, men=1, initial=1, fighting=True)
+        self.player('swords', 50, 198, fighting=True)
+        self.go('hold')
+        self.g.selected_ids[wizard.id] = True
+        self.run_ticks(1, walk=False)
+        self.assertEqual(len(self.g.casts), 1)
+        self.g.clock = self.g.clock + 300
+        self.general.player_order()
+        self.assertFalse(self.general.paused(wizard.id))
+
+    def test_a_click_just_before_an_echo_still_holds_the_unit(self):
         unit = self.player('swords', 0, 0)
         self.enemy('swords', 0, 50)
         self.go()
         self.run_ticks(1, walk=False)
-        self.general.player_order()     # nothing selected: this one cannot be the player's
         self.g.selected_ids[unit.id] = True
-        self.g.orders[unit.id] = None
-        unit.idle = True
-        self.run_ticks(3, walk=False)   # gives a new order
         self.g.clock = self.g.clock + 100
-        self.general.player_order()     # the echo of that order
-        self.assertFalse(self.general.paused(unit.id))
-        self.g.clock = self.g.clock + 700
-        self.general.player_order()     # too long after any order of ours: the player
+        self.general.player_order()     # takes the place of the echo still on its way
+        self.g.clock = self.g.clock + 200
+        self.general.player_order()     # which then counts as the click
+        self.assertTrue(self.general.paused(unit.id))
+
+    def test_an_echo_that_never_comes_stops_being_waited_for(self):
+        unit = self.player('swords', 0, 0)
+        self.enemy('swords', 0, 50)
+        self.go()
+        self.run_ticks(1, walk=False)
+        self.g.selected_ids[unit.id] = True
+        self.g.clock = self.g.clock + self.g.TUNE.echo_wait + 100
+        self.general.player_order()
         self.assertTrue(self.general.paused(unit.id))
 
     def test_an_order_given_while_paused_is_the_players_however_recent_ours_was(self):
@@ -280,7 +317,6 @@ class GeneralTests(unittest.TestCase):
         self.enemy('swords', 0, 50)
         self.go()
         self.run_ticks(1, walk=False)
-        self.general.player_order()     # learns that echoes come late
         self.g.selected_ids[unit.id] = True
         self.g.game_speed = 0           # the clock stands still from here on
         self.general.player_order()
@@ -648,37 +684,288 @@ class GeneralTests(unittest.TestCase):
         moves = [o for o in self.g.order_log.values() if o.unit == knights.id and o.order.kind == 'move']
         self.assertLessEqual(len(moves), 2)
 
+    # Who rides when -------------------------------------------------------------------
+    def lines_close(self):
+        """Infantry 70m apart, so the battle has begun but nobody has met anybody."""
+        line = self.player('swords', 100, 0)
+        foe = self.enemy('swords', 100, 70)
+        return line, foe
+
+    def mortar(self, x, z):
+        return self.enemy('mortar', x, z, class_='art_fld', reach=300, ammo=20, start_ammo=20)
+
+    def test_cavalry_does_not_ride_through_the_enemy_for_what_is_behind_it(self):
+        self.lines_close()
+        knights = self.player('knights', 0, 0, speed=9)
+        self.enemy('spears', 0, 75)
+        self.mortar(0, 300)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        self.assertIsNone(self.order(knights))
+
+    def test_a_ride_along_the_flank_is_still_open(self):
+        self.lines_close()
+        knights = self.player('knights', -200, 0, speed=9)
+        gun = self.mortar(-300, 200)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        self.assertIsNotNone(self.order(knights))
+        self.assertEqual(self.order(knights).target.id if self.order(knights).kind == 'attack' else gun.id, gun.id)
+
+    def test_flyers_go_over_what_stands_in_the_way(self):
+        self.lines_close()
+        knights = self.player('knights', 0, 0, speed=9, flies=True)
+        self.enemy('spears', 0, 75)
+        self.mortar(0, 300)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        self.assertIsNotNone(self.order(knights))
+
+    def test_cavalry_does_not_go_in_ahead_of_the_line(self):
+        self.lines_close()
+        knights = self.player('knights', -150, 0, speed=9)
+        self.enemy('swords', -90, 70)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        self.assertIsNone(self.order(knights))
+
+    def test_only_men_on_foot_getting_stuck_in_releases_the_cavalry(self):
+        self.lines_close()
+        knights = self.player('knights', -150, 0, speed=9)
+        other = self.player('knights', -300, 0, speed=9, fighting=True)
+        self.enemy('swords', -300, 3, fighting=True)
+        self.enemy('swords', -90, 70)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        self.assertIsNone(self.order(knights))
+        self.assertIsNone(self.order(other))
+
+    def test_cavalry_goes_once_the_line_has_met_them(self):
+        line, foe = self.lines_close()
+        knights = self.player('knights', -150, 0, speed=9)
+        self.go('attack')
+        line.fighting, foe.fighting = True, True
+        self.run_ticks(1, walk=False)
+        self.assertIsNotNone(self.order(knights))
+
+    def test_cavalry_does_not_wait_for_ever(self):
+        self.lines_close()
+        knights = self.player('knights', -150, 0, speed=9)
+        self.enemy('swords', -90, 70)
+        self.go('attack')
+        self.run_ticks(int(self.g.TUNE.charge_wait / 1000), walk=False)
+        self.assertIsNone(self.order(knights))
+        self.run_ticks(2, walk=False)
+        self.assertIsNotNone(self.order(knights))
+
+    def test_cavalry_rides_to_stop_what_is_coming_for_our_casters(self):
+        self.lines_close()
+        wizard = self.player('wizard', 40, -60, men=1, initial=1, magic=True)
+        knights = self.player('knights', -150, 0, speed=9)
+        raider = self.enemy('knights', 0, 100, speed=9, aimed_at=wizard)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        self.assertEqual(self.target(knights).id, raider.id)
+
+    def test_cavalry_meets_horse_that_comes_close_but_not_spears(self):
+        self.lines_close()
+        knights = self.player('knights', -150, 0, speed=9)
+        rider = self.enemy('knights', -150, 60, speed=9)
+        self.enemy('spears', -180, 60)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        self.assertEqual(self.target(knights).id, rider.id)
+
+    def test_spears_alone_nearby_do_not_draw_the_cavalry_early(self):
+        self.lines_close()
+        knights = self.player('knights', -150, 0, speed=9)
+        self.enemy('spears', -150, 60)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        self.assertIsNone(self.order(knights))
+
+    # Riding down the routed ----------------------------------------------------------
+    def fight_elsewhere(self):
+        self.player('swords', 300, 0, fighting=True)
+        return self.enemy('swords', 300, 3, fighting=True)
+
+    def assertNotAfter(self, unit, target):
+        order = self.order(unit)
+        self.assertFalse(order and order.kind == 'attack' and order.target.id == target.id)
+
+    def test_fast_units_ride_down_what_can_still_rally(self):
+        self.fight_elsewhere()
+        rider = self.player('knights', 0, 0, speed=9)
+        runner = self.enemy('swords', 0, 60, routing=True, speed=5)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        self.assertTargets(rider, runner)
+        self.assertTrue(self.order(rider).run)
+
+    def test_the_shattered_are_left_to_run(self):
+        self.fight_elsewhere()
+        rider = self.player('knights', 0, 0, speed=9)
+        runner = self.enemy('swords', 0, 60, routing=True, shattered=True, speed=5)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        self.assertNotAfter(rider, runner)
+
+    def test_nobody_rides_far_after_a_runner(self):
+        self.fight_elsewhere()
+        rider = self.player('knights', 0, 0, speed=9)
+        runner = self.enemy('swords', 0, self.g.TUNE.hunt_reach + 20, routing=True, speed=5)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        self.assertNotAfter(rider, runner)
+
+    def test_nobody_rides_after_what_it_cannot_catch(self):
+        self.fight_elsewhere()
+        rider = self.player('knights', 0, 0, speed=9)
+        runner = self.enemy('knights', 0, 60, routing=True, speed=9)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        self.assertNotAfter(rider, runner)
+
+    def test_one_rider_for_each_runner(self):
+        self.fight_elsewhere()
+        first = self.player('knights', 0, 0, speed=9)
+        second = self.player('knights', 30, 0, speed=9)
+        runner = self.enemy('swords', 15, 60, routing=True, speed=5)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        after = [u for u in (first, second) if self.order(u) and self.order(u).kind == 'attack'
+                 and self.order(u).target.id == runner.id]
+        self.assertEqual(len(after), 1)
+
+    def test_a_runner_behind_their_line_is_not_worth_the_ride(self):
+        self.fight_elsewhere()
+        rider = self.player('knights', 0, 0, speed=9)
+        self.enemy('spears', 0, 50)
+        runner = self.enemy('swords', 0, 95, routing=True, speed=5)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        self.assertNotAfter(rider, runner)
+
+    def test_what_threatens_our_men_comes_before_any_runner(self):
+        self.fight_elsewhere()
+        wizard = self.player('wizard', 40, -60, men=1, initial=1, magic=True)
+        rider = self.player('knights', 0, 0, speed=9)
+        self.enemy('swords', 0, 60, routing=True, speed=5)
+        raider = self.enemy('knights', -60, 60, speed=9, aimed_at=wizard)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        self.assertEqual(self.target(rider).id, raider.id)
+
+    def test_leaders_and_men_on_foot_stay_out_of_the_hunt(self):
+        self.fight_elsewhere()
+        hero = self.player('rider_hero', 0, 0, speed=9, men=1, initial=1)
+        foot = self.player('swords', 60, 0, speed=9)
+        runner = self.enemy('swords', 30, 40, routing=True, speed=5)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        for unit in (hero, foot):
+            self.assertNotAfter(unit, runner)
+
+    def test_horse_archers_with_nothing_else_shoot_the_runners(self):
+        raiders = self.shooter('raiders', 0, 0, speed=9)
+        self.fight_elsewhere()
+        runner = self.enemy('swords', 0, 80, routing=True, speed=5)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        self.assertTargets(raiders, runner)
+        self.assertTrue(self.order(raiders).run)
+
+    def test_holding_means_nobody_leaves_to_shoot_runners(self):
+        raiders = self.shooter('raiders', 0, 0, speed=9)
+        self.fight_elsewhere()
+        self.enemy('swords', 0, 80, routing=True, speed=5)
+        self.go('hold')
+        self.run_ticks(1, walk=False)
+        self.assertIsNone(self.order(raiders))
+
     # Standing against a charge --------------------------------------------------------
+    def ride(self, unit, ticks=1, step=8):
+        """Ticks in which this unit covers ground, as a horse at a charge does."""
+        for i in range(ticks):
+            self.run_ticks(1, walk=False)
+            unit.z = unit.z - step if i % 2 == 0 else unit.z + step
+
     def test_spears_stand_and_turn_to_face_a_charge(self):
         spears = self.player('spears', 0, 0, facing=0)
-        self.enemy('knights', 50, 60, fast=True, speed=9, facing=220)
+        knights = self.enemy('knights', 50, 68, speed=9, facing=220)
         self.enemy('swords', 0, 400)
         self.go('attack')
+        self.ride(knights)
         self.run_ticks(1, walk=False)
         order = self.order(spears)
         self.assertEqual((order.kind, order.x, order.z), ('move', 0, 0))
         self.assertAlmostEqual(order.facing, 39.8, 0)
 
+    def test_a_horse_standing_still_is_no_charge(self):
+        spears = self.player('spears', 0, 0, facing=0)
+        knights = self.enemy('knights', 0, 40, speed=9)
+        self.go('attack')
+        self.run_ticks(3, walk=False)
+        self.assertTargets(spears, knights)
+
     def test_a_charge_that_never_arrives_is_given_up_on(self):
         spears = self.player('spears', 0, 0)
-        knights = self.enemy('knights', 0, 40, fast=True, speed=5)
+        knights = self.enemy('knights', 0, 40, speed=5)
         self.go('attack')
-        self.run_ticks(14, walk=False)
+        self.ride(knights, 15)
         self.assertTargets(spears, knights)
 
     def test_spears_do_not_brace_against_what_is_not_coming_for_them(self):
         spears = self.player('spears', 0, 0)
-        knights = self.enemy('knights', 0, 40, fast=True, speed=5, facing=0)
+        knights = self.enemy('knights', 0, 40, speed=5, facing=0)
         self.go('attack')
+        self.ride(knights, 2)
         self.run_ticks(1, walk=False)
         self.assertTargets(spears, knights)
 
     def test_other_infantry_meets_a_charge_head_on(self):
         swords = self.player('swords', 0, 0)
-        knights = self.enemy('knights', 0, 40, fast=True, speed=5)
+        knights = self.enemy('knights', 0, 40, speed=5)
         self.go('hold')
+        self.ride(knights, 2)
         self.run_ticks(1, walk=False)
         self.assertTargets(swords, knights)
+
+    # What counts as a threat -----------------------------------------------------------
+    def support_under_fire(self, shooter_key='archers', **extra):
+        archers = self.shooter('archers', 0, -40)
+        line = self.player('swords', 0, 0)
+        front = self.enemy('swords', 0, 60)
+        return line, front, self.enemy(shooter_key, 30, 130, aimed_at=archers, **extra)
+
+    def test_bowmen_aiming_at_our_archers_do_not_draw_the_line(self):
+        line, front, _ = self.support_under_fire(reach=160, ammo=30, start_ammo=30, class_='inf_mis')
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        self.assertTargets(line, front)
+
+    def test_a_caster_aiming_at_our_archers_does_not_draw_the_line(self):
+        line, front, _ = self.support_under_fire('wizard', men=1, initial=1, magic=True)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        self.assertTargets(line, front)
+
+    def test_a_gun_on_our_flank_does_not_count_as_turning_it(self):
+        gun = self.mortar(120, 130)
+        line = self.player('swords', 0, 0, left_threat=gun)
+        front = self.enemy('swords', 0, 60)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        self.assertTargets(line, front)
+
+    def test_what_comes_for_our_archers_on_foot_is_still_met(self):
+        archers = self.shooter('archers', 0, -40)
+        line = self.player('swords', 0, 0)
+        self.enemy('swords', -30, 60)
+        raider = self.enemy('swords', 60, 130, aimed_at=archers)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        self.assertTargets(line, raider)
 
     # Reacting -------------------------------------------------------------------------
     def test_a_wavering_enemy_draws_the_attack(self):
@@ -1496,7 +1783,48 @@ class GeneralTests(unittest.TestCase):
         self.run_ticks(1, walk=False)
         cast = self.cast_list()[0]
         self.assertEqual(cast.key, 'aura')
-        self.assertIsNone(cast.target)
+        self.assertEqual(cast.target.id, lord.id)
+
+    def test_a_refused_ability_costs_that_ability_and_not_the_unit(self):
+        wizard = self.player('wizard', 0, 0, men=1, initial=1, magic=True)
+        self.give(wizard, 'aura', 'bolt')
+        self.g.refused_abilities.aura = True
+        self.player('swords', 15, 0, fighting=True)
+        self.enemy('swords', 15, 3, fighting=True)
+        self.go('hold')
+        self.run_ticks(1, walk=False)
+        self.assertEqual([c.key for c in self.cast_list()], ['bolt'])
+        self.assertEqual(self.general.mode(), 'all')
+        self.g.ready_text = 'aura,bolt'
+        refusals = lambda: [t for t in self.g.env_logs.values() if 'refused' in t]
+        self.assertIn('aura', refusals()[0])
+        self.run_ticks(5, walk=False)
+        self.assertEqual(len(refusals()), 1)
+
+    def test_a_refused_ability_is_tried_again_after_a_while(self):
+        wizard = self.player('wizard', 0, 0, men=1, initial=1, magic=True)
+        self.give(wizard, 'aura')
+        self.g.refused_abilities.aura = True
+        self.player('swords', 15, 0, fighting=True)
+        self.enemy('swords', 15, 3, fighting=True)
+        self.go('hold')
+        self.run_ticks(1, walk=False)
+        self.g.refused_abilities.aura = None
+        self.run_ticks(int(self.g.TUNE.refused_gap / 1000) + 2, walk=False)
+        self.assertEqual([c.key for c in self.cast_list()][:1], ['aura'])
+
+    def test_a_unit_refusing_an_ability_can_still_be_given_orders(self):
+        wizard = self.player('wizard', 0, 0, men=1, initial=1, magic=True, speed=6)
+        self.give(wizard, 'aura')
+        self.g.refused_abilities.aura = True
+        self.player('swords', 15, 0, fighting=True)
+        self.enemy('swords', 15, 3, fighting=True)
+        self.go('hold')
+        self.run_ticks(1, walk=False)
+        raider = self.enemy('knights', 0, 30, speed=9)
+        self.run_ticks(1, walk=False)
+        self.assertIsNotNone(raider)
+        self.assertEqual(self.order(wizard).kind, 'move')
 
     def test_self_buffs_fire_on_contact_not_before(self):
         lord = self.player('lord', 0, 0, lord=True, men=1, initial=1)
@@ -1915,11 +2243,487 @@ class GeneralTests(unittest.TestCase):
         self.run_ticks(4, walk=False)
         self.assertTrue(archers.behaviours.fire_at_will)
 
-    def test_walled_siege_starts_on_the_native_doctrine(self):
-        siege = self.lua.execute('return NEW_GENERAL(bm, {data=DATA, walled=function() return true end})')
-        self.assertEqual(siege.doctrine(), 'auto')
-        siege.begin()
-        self.assertEqual(siege.doctrine(), 'native')
+    # Casters and their cover --------------------------------------------------------
+    def test_cavalry_far_ahead_does_not_pull_the_casters_forward(self):
+        wizard = self.player('wizard', 0, -100, men=1, initial=1, magic=True)
+        self.player('swords', 0, 0)
+        self.player('knights', 0, 250)
+        self.enemy('swords', 0, 300)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        self.assertEqual(self.order(wizard).kind, 'move')
+        self.assertAlmostEqual(self.order(wizard).z, -self.g.TUNE.caster_setback, 0)
+
+    def test_an_army_of_riders_still_has_a_front(self):
+        self.player('knights', 0, 0)
+        self.player('knights', 0, 230)
+        self.enemy('swords', 0, 290)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        self.assertEqual(self.general.phase(), 'battle')
+
+    def test_a_caster_who_cannot_fight_leaves_a_melee_for_cover(self):
+        wizard = self.player('wizard', -50, 20, men=1, initial=1, magic=True, fighting=True)
+        line = self.player('swords', 100, 0)
+        self.enemy('knights', -50, 22, fighting=True)
+        self.enemy('swords', 100, 70)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        order = self.order(wizard)
+        self.assertEqual((order.kind, order.run), ('move', True))
+        self.assertLess(abs(order.x - line.x), 40)
+        self.assertLess(order.z, line.z)
+
+    def test_a_caster_makes_for_cover_before_it_is_caught(self):
+        wizard = self.player('wizard', -50, 0, men=1, initial=1, magic=True, speed=5)
+        self.player('swords', 100, 0)
+        self.enemy('knights', -50, 40, speed=9)
+        self.enemy('swords', 100, 70)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        self.assertEqual((self.order(wizard).kind, self.order(wizard).run), ('move', True))
+
+    def test_a_caster_already_behind_its_men_stays_and_casts(self):
+        wizard = self.player('wizard', 0, -30, men=1, initial=1, magic=True, fighting=True)
+        self.give(wizard, 'curse')
+        self.player('swords', 0, 0, fighting=True)
+        self.enemy('swords', 0, 3, fighting=True)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        self.assertIsNone(self.order(wizard))
+        self.assertEqual(len(self.g.casts), 1)
+
+    def test_a_caster_that_can_fight_stays_in_the_melee(self):
+        mage = self.player('battle_mage', -50, 20, men=1, initial=1, magic=True, fighting=True)
+        self.player('swords', 100, 0)
+        self.enemy('knights', -50, 22, fighting=True)
+        self.enemy('swords', 100, 70)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        self.assertIsNone(self.order(mage))
+
+    def test_a_lone_caster_still_gets_away(self):
+        wizard = self.player('wizard', 0, 0, men=1, initial=1, magic=True, fighting=True)
+        self.enemy('knights', 0, 3, fighting=True)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        self.assertLess(self.order(wizard).z, 0)
+
+    def test_no_spell_on_the_way_out(self):
+        wizard = self.player('wizard', -50, 20, men=1, initial=1, magic=True, fighting=True)
+        self.give(wizard, 'curse')
+        self.player('swords', 100, 0)
+        self.enemy('knights', -50, 22, fighting=True)
+        self.enemy('swords', 100, 70)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        self.assertEqual(self.order(wizard).kind, 'move')
+        self.assertEqual(len(self.g.casts), 0)
+        wizard.idle = True
+        self.g.order_log = self.lua.table()
+        wizard.x, wizard.z = 0, -10
+        wizard.fighting = False
+        self.run_ticks(1, walk=False)
+        self.assertEqual(len(self.g.casts), 1)
+
+    # Men on foot with a bow ------------------------------------------------------------
+    def test_foot_archers_leave_riders_to_fire_at_will(self):
+        archers = self.shooter('archers', behaviours={'fire_at_will': True})
+        rider = self.enemy('knights', 0, 100, speed=9)
+        self.go('hold')
+        self.run_ticks(1, walk=False)
+        self.assertTargets(archers, rider)
+        rider.x = 12
+        self.run_ticks(1, walk=False)
+        self.assertEqual(self.order(archers).kind, 'halt')
+        self.assertTrue(archers.behaviours.fire_at_will)
+
+    def test_foot_archers_stay_on_what_stands_or_walks(self):
+        archers = self.shooter('archers', behaviours={'fire_at_will': True})
+        foe = self.enemy('swords', 0, 100)
+        self.go('hold')
+        self.run_ticks(1, walk=False)
+        foe.z = 97
+        self.run_ticks(1, walk=False)
+        self.assertTargets(archers, foe)
+
+    def test_horse_archers_may_aim_at_what_rides(self):
+        raiders = self.shooter('raiders', speed=9)
+        rider = self.enemy('knights', 0, 170, speed=9)
+        self.go('hold')
+        self.run_ticks(1, walk=False)
+        self.assertIsNone(self.order(raiders))
+        rider.z = 150
+        self.run_ticks(1, walk=False)
+        self.assertTargets(raiders, rider)
+
+    def test_a_target_walking_out_of_range_is_not_walked_after(self):
+        archers = self.shooter('archers', reach=160)
+        foe = self.enemy('swords', 0, 155)
+        self.go('hold')
+        self.run_ticks(1, walk=False)
+        self.assertTargets(archers, foe)
+        foe.z = 170
+        self.run_ticks(1, walk=False)
+        self.assertEqual(self.order(archers).kind, 'halt')
+
+    def test_a_shooter_dragged_along_by_a_melee_stops_following(self):
+        archers = self.shooter('archers')
+        self.enemy('knights', 0, 100, speed=9)
+        self.go('hold')
+        self.run_ticks(1, walk=False)
+        archers.fighting = True
+        archers.z = 8
+        self.g.clock = self.g.clock + 2500
+        self.run_ticks(1, walk=False)
+        self.assertEqual(self.order(archers).kind, 'halt')
+
+    def test_a_shooter_standing_in_a_melee_is_left_to_it(self):
+        archers = self.shooter('archers')
+        self.enemy('knights', 0, 100, speed=9)
+        self.go('hold')
+        self.run_ticks(1, walk=False)
+        archers.fighting = True
+        self.run_ticks(3, walk=False)
+        self.assertEqual(self.order(archers).kind, 'attack')
+
+    def test_a_shooter_gone_silent_changes_target(self):
+        archers = self.shooter('archers')
+        self.enemy('swords', -40, 100)
+        self.enemy('swords', 40, 100)
+        self.go('hold')
+        self.run_ticks(1, walk=False)
+        first = self.target(archers).id
+        self.run_ticks(int(self.g.TUNE.silent_limit / 1000) + 1, walk=False)
+        self.assertNotEqual(self.target(archers).id, first)
+
+    def test_a_shooter_using_up_arrows_keeps_its_target(self):
+        archers = self.shooter('archers')
+        archers.ammo, archers.start_ammo = 500, 500
+        self.enemy('swords', -40, 100)
+        self.enemy('swords', 40, 100)
+        self.go('hold')
+        self.run_ticks(1, walk=False)
+        first = self.target(archers).id
+        for _ in range(30):
+            archers.ammo = archers.ammo - 1
+            self.run_ticks(1, walk=False)
+        self.assertEqual(self.target(archers).id, first)
+
+    def test_a_shooter_with_endless_arrows_counts_its_hits(self):
+        archers = self.shooter('archers')
+        self.enemy('swords', -40, 100)
+        self.enemy('swords', 40, 100)
+        self.go('hold')
+        self.run_ticks(1, walk=False)
+        first = self.target(archers).id
+        for tick in range(30):
+            archers.kills = tick
+            self.run_ticks(1, walk=False)
+        self.assertEqual(self.target(archers).id, first)
+
+    def test_the_only_target_going_silent_leaves_them_where_they_are(self):
+        archers = self.shooter('archers')
+        self.enemy('swords', 0, 100)
+        self.go('hold')
+        self.run_ticks(int(self.g.TUNE.silent_limit / 1000) + 2, walk=False)
+        self.assertEqual(self.order(archers).kind, 'halt')
+
+    def test_a_silent_target_is_given_another_chance_later(self):
+        archers = self.shooter('archers')
+        foe = self.enemy('swords', 0, 100)
+        self.go('hold')
+        self.run_ticks(int((self.g.TUNE.silent_limit + self.g.TUNE.silent_skip) / 1000) + 3, walk=False)
+        self.assertTargets(archers, foe)
+
+    # Walled sieges ------------------------------------------------------------------
+    def siege(self, walled=True):
+        self.g.walled_battle = walled
+        self.general = self.lua.execute('''
+            return NEW_GENERAL(bm, {data=DATA, walled=function() return walled_battle end})
+        ''')
+
+    def test_a_walled_siege_is_left_to_the_player(self):
+        self.siege()
+        unit = self.player('swords', 0, 0)
+        self.enemy('swords', 0, 40)
+        self.go()
+        self.run_ticks(3, walk=False)
+        self.assertEqual(len(self.g.order_log), 0)
+        self.assertEqual(self.g.planner_calls, 0)
+        self.assertFalse(self.general.managed(unit.id))
+        self.assertEqual(self.general.doctrine(), 'auto')
+        self.assertIn('原生 AI', self.general.status())
+
+    def test_an_open_field_is_commanded_as_ever(self):
+        self.siege(walled=False)
+        unit = self.player('swords', 0, 0)
+        self.enemy('swords', 0, 40)
+        self.go()
+        self.run_ticks(1, walk=False)
+        self.assertIsNotNone(self.order(unit))
+
+    def test_no_scripted_doctrine_opens_a_walled_siege(self):
+        self.siege()
+        self.player('swords', 0, 0)
+        self.enemy('swords', 0, 40)
+        for doctrine in ('attack', 'hold'):
+            self.go(doctrine)
+            self.run_ticks(2, walk=False)
+            self.assertEqual(len(self.g.order_log), 0)
+            self.assertEqual(self.g.planner_calls, 0)
+
+    def test_picking_the_native_ai_takes_a_walled_siege_and_leaving_it_gives_it_back(self):
+        self.siege()
+        unit = self.player('swords', 0, 0)
+        self.enemy('swords', 0, 40)
+        self.go('native')
+        self.run_ticks(1, walk=False)
+        self.assertIsNotNone(self.g.planner_units[unit.id])
+        self.assertTrue(self.general.managed(unit.id))
+        self.general.cycle_doctrine()
+        self.assertEqual(self.general.doctrine(), 'auto')
+        self.run_ticks(1, walk=False)
+        self.assertReleasedThenRemoved(unit)
+        self.assertFalse(self.general.managed(unit.id))
+        self.assertEqual(len(self.g.order_log), 0)
+
+    def test_handing_units_over_is_refused_in_a_walled_siege(self):
+        self.siege()
+        unit = self.player('swords', 0, 0)
+        self.enemy('swords', 0, 40)
+        self.g.selected_ids[unit.id] = True
+        given, text = self.general.toggle_selected()
+        self.assertIsNone(given)
+        self.assertIn('原生 AI', text)
+        self.assertFalse(self.general.managed(unit.id))
+
+    def test_units_picked_for_the_native_ai_do_not_stay_marked_after_it(self):
+        self.siege()
+        unit = self.player('swords', 0, 0)
+        self.enemy('swords', 0, 40)
+        self.go('native')
+        self.general.set_mode('off')
+        self.g.selected_ids[unit.id] = True
+        self.assertEqual(self.general.toggle_selected(), (True, 1))
+        self.run_ticks(1, walk=False)
+        self.assertIsNotNone(self.g.planner_units[unit.id])
+        self.general.cycle_doctrine()
+        self.run_ticks(1, walk=False)
+        self.assertIsNone(self.g.planner_units[unit.id])
+        self.assertFalse(self.general.managed(unit.id))
+
+    def test_a_won_walled_siege_is_still_chased(self):
+        self.siege()
+        unit = self.player('swords', 0, 0, speed=9)
+        foe = self.enemy('swords', 0, 100, routing=True, speed=5)
+        self.go()
+        self.run_ticks(1, walk=False)
+        self.assertEqual(len(self.g.order_log), 0)
+        self.general.victory()
+        self.run_ticks(1, walk=False)
+        self.assertTargets(unit, foe)
+        self.assertEqual(self.g.planner_calls, 0)
+
+    # The journal --------------------------------------------------------------------
+    def journalled(self, name='general.log'):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        path = Path(folder.name) / name
+        self.g.journal_path = str(path)
+        self.general = self.lua.execute('return NEW_GENERAL(bm, {data=DATA, journal_file=journal_path})')
+        return path
+
+    @staticmethod
+    def rows(path, event):
+        lines = path.read_text(encoding='utf-8').splitlines()
+        rows = [line.split('\t') for line in lines]
+        return [dict(part.split('=', 1) for part in row[2:]) for row in rows if row[1] == event]
+
+    def test_the_journal_is_on_disk_after_every_tick(self):
+        path = self.journalled()
+        unit = self.player('swords', 0, 0)
+        foe = self.enemy('swords', 0, 50)
+        self.go()
+        self.run_ticks(1, walk=False)
+        battle = self.rows(path, 'battle')[0]
+        self.assertEqual((battle['mode'], battle['doctrine'], battle['type']), ('all', 'auto', 'land_normal'))
+        self.assertEqual((battle['friends'], battle['enemies']), ('1', '1'))
+        order = self.rows(path, 'order')[0]
+        self.assertEqual((order['unit'], order['kind'], order['key']), (str(unit.id), 'attack', 'swords'))
+        self.assertEqual(order['target'], str(foe.id))
+
+    def test_nothing_is_written_while_the_commander_is_off(self):
+        path = self.journalled()
+        self.player('swords', 0, 0)
+        self.enemy('swords', 0, 50)
+        self.run_ticks(3, walk=False)
+        self.general.stop()
+        self.assertFalse(path.exists())
+
+    def test_the_whole_field_is_pictured_every_five_seconds(self):
+        path = self.journalled()
+        unit = self.player('swords', 0, 0)
+        foe = self.enemy('swords', 0, 50, hp=.5, kills=7)
+        self.go()
+        self.run_ticks(11, walk=False)
+        self.assertEqual(len(self.rows(path, 'field')), 3)
+        units = self.rows(path, 'unit')
+        self.assertEqual(len(units), 6)
+        ours, theirs = units[-2], units[-1]
+        self.assertEqual((ours['side'], ours['id'], ours['ai']), ('us', str(unit.id), 'true'))
+        self.assertEqual((ours['order'], ours['target']), ('attack', str(foe.id)))
+        self.assertEqual((theirs['side'], theirs['hp'], theirs['kills']), ('them', '0.50', '7'))
+        self.assertNotIn('ai', theirs)
+
+    def test_a_walled_siege_is_on_file_too(self):
+        path = self.journalled()
+        self.lua.execute('''
+            local name = journal_path
+            journalled_siege = NEW_GENERAL(bm, {data=DATA, journal_file=name, walled=function() return true end})
+        ''')
+        self.general = self.g.journalled_siege
+        self.player('swords', 0, 0)
+        self.enemy('swords', 0, 50)
+        self.go()
+        self.run_ticks(2, walk=False)
+        self.assertEqual(self.rows(path, 'battle')[0]['walled'], 'true')
+        self.assertIn('原生 AI', self.rows(path, 'field')[0]['status'])
+
+    def test_a_unit_going_to_the_planner_is_on_file_before_the_call(self):
+        path = self.journalled()
+        self.player('swords', 0, 0)
+        self.enemy('swords', 0, 50)
+        seen = []
+        self.g.planner_hook = lambda _: seen.append(len(self.rows(path, 'planner')))
+        self.go('native')
+        self.run_ticks(1, walk=False)
+        self.assertEqual(seen, [1])
+
+    def test_echoes_and_player_orders_are_told_apart(self):
+        path = self.journalled()
+        unit = self.player('swords', 0, 0)
+        self.enemy('swords', 0, 50)
+        self.g.echo_handler = self.general.player_order
+        self.g.echo_mode = 'sync'
+        self.go()
+        self.run_ticks(1, walk=False)
+        self.assertEqual(self.rows(path, 'echo')[0]['when'], 'inside')
+        self.g.echo_mode = None
+        self.g.clock = self.g.clock + 150
+        self.general.player_order()     # nothing selected: an echo, a moment late
+        self.g.selected_ids[unit.id] = True
+        self.g.clock = self.g.clock + 700
+        self.general.player_order()     # the player's
+        self.run_ticks(1, walk=False)
+        self.assertEqual(self.rows(path, 'player')[0], {'selected': '1', 'taken': '1'})
+
+    def test_an_echo_on_time_is_on_file_with_its_delay(self):
+        path = self.journalled()
+        self.player('swords', 0, 0)
+        self.enemy('swords', 0, 50)
+        self.go()
+        self.run_ticks(1, walk=False)
+        self.g.clock = self.g.clock + 300
+        self.general.player_order()
+        self.run_ticks(1, walk=False)
+        self.assertEqual(self.rows(path, 'echo')[0], {'when': 'later', 'gap': '300'})
+
+    def test_real_speed_and_silence_are_on_file(self):
+        path = self.journalled()
+        archers = self.shooter('archers')
+        foe = self.enemy('swords', 0, 100)
+        self.go('hold')
+        self.run_ticks(1, walk=False)
+        foe.z = 103
+        self.run_ticks(int(self.g.TUNE.silent_limit / 1000) + 2, walk=False)
+        self.assertEqual(self.rows(path, 'silent')[0], {'unit': str(archers.id), 'key': 'archers', 'target': str(foe.id)})
+        self.assertEqual(self.rows(path, 'unit')[1]['pace'], '0.0')
+
+    def test_casts_and_held_fire_are_on_file(self):
+        path = self.journalled()
+        self.player('wizard', 0, -80, abilities=self.lua.table_from(['bolt']))
+        archers = self.shooter('guns', x=200, z=0, behaviours={'fire_at_will': True})
+        self.player('swords', 200, 100, fighting=True)
+        self.enemy('lord', 200, 102, fighting=True)
+        self.go('hold')
+        self.run_ticks(1, walk=False)
+        self.assertEqual(self.rows(path, 'cast')[0]['ability'], 'bolt')
+        self.assertEqual(self.rows(path, 'fire')[0], {'unit': str(archers.id), 'key': 'guns', 'hold': 'true'})
+
+    def test_the_end_of_a_battle_is_written_once(self):
+        path = self.journalled()
+        self.player('swords', 0, 0)
+        self.enemy('swords', 0, 50)
+        self.go()
+        self.run_ticks(1, walk=False)
+        self.general.victory()
+        self.general.stop()
+        self.general.stop()
+        self.assertEqual(self.rows(path, 'end'), [{'orders': '1', 'casts': '0'}])
+        self.assertEqual(len(self.rows(path, 'victory')), 1)
+        self.assertEqual(len(self.rows(path, 'field')), 2)
+
+    def test_a_folder_it_cannot_write_to_costs_nothing(self):
+        path = self.journalled()
+        self.g.journal_path = str(path.parent / 'missing' / 'general.log')
+        self.general = self.lua.execute('return NEW_GENERAL(bm, {data=DATA, journal_file=journal_path})')
+        unit = self.player('swords', 0, 0)
+        self.enemy('swords', 0, 50)
+        self.go()
+        self.run_ticks(5, walk=False)
+        self.assertEqual(self.general.mode(), 'all')
+        self.assertIsNotNone(self.order(unit))
+
+    def test_a_broken_journal_never_stands_the_commander_down(self):
+        self.journalled()
+        self.lua.execute("io.open = function() error('disk on fire') end")
+        unit = self.player('swords', 0, 0)
+        self.enemy('swords', 0, 50)
+        self.go()
+        self.run_ticks(5, walk=False)
+        self.assertEqual(self.general.mode(), 'all')
+        self.assertIsNotNone(self.order(unit))
+
+    def test_a_failed_picture_never_costs_a_tick(self):
+        path = self.journalled()
+        unit = self.player('swords', 0, 0)
+        self.enemy('swords', 0, 50)
+        unit.number_of_enemies_killed = None
+        self.go()
+        self.run_ticks(5, walk=False)
+        self.assertEqual(self.general.mode(), 'all')
+        self.assertEqual(len(self.rows(path, 'order')), 1)
+        self.assertEqual([n for n in self.rows(path, 'note') if 'failed' in n['text']], [])
+
+    def test_battles_add_up_in_one_file(self):
+        path = self.journalled()
+        path.write_text('0\told\n', encoding='utf-8')
+        self.player('swords', 0, 0)
+        self.enemy('swords', 0, 50)
+        self.go()
+        self.run_ticks(1, walk=False)
+        self.assertEqual(path.read_text(encoding='utf-8').splitlines()[0], '0\told')
+
+    def test_an_oversized_file_is_started_over_once(self):
+        path = self.journalled()
+        self.g.JOURNAL.limit = 5
+        path.write_text('0\told battle\n', encoding='utf-8')
+        self.player('swords', 0, 0)
+        self.enemy('swords', 0, 50)
+        self.go()
+        self.run_ticks(3, walk=False)
+        text = path.read_text(encoding='utf-8')
+        self.assertNotIn('old battle', text)
+        self.assertEqual(len(self.rows(path, 'battle')), 1)
+        self.assertGreaterEqual(len(self.rows(path, 'order')), 1)
+
+    def test_every_event_stays_on_one_line(self):
+        path = self.journalled()
+        journal = self.g.NEW_JOURNAL(str(path))
+        journal.add(5, 'note', 'text', 'two\nlines\twith a tab', 'gone', None, 'kept', False)
+        journal.save()
+        self.assertEqual(path.read_text(encoding='utf-8'), '5\tnote\ttext=two lines with a tab\tkept=false\n')
 
     def test_units_owned_stay_owned_when_the_engine_stops_calling_them_the_players(self):
         unit = self.player('swords', 0, 0)

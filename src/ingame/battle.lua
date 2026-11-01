@@ -351,10 +351,11 @@ local function new_battle_trainer(manager)
         end, 2500, 'wh3pt_battle_flash')
     end
     local function toggle_selected()
-        local given, count = general.toggle_selected()
-        local text = given == nil and '先选中部队' or (given and 'AI 接管 ' or '已收回 ') .. count .. ' 队'
+        local given, detail = general.toggle_selected()
+        local text = given == nil and (detail or '先选中部队') or (given and 'AI 接管 ' or '已收回 ') .. detail .. ' 队'
         report(text)
-        flash(text)
+        -- The launcher only has room for a few words.
+        flash(given == nil and detail and '城墙战不托管' or text)
         update_general_buttons()
         mark_cards()
     end
@@ -684,7 +685,7 @@ local function new_battle_trainer(manager)
         silence_ui:SetTooltipText('继承战役设置，可在本场独立切换；只作用于敌方。每秒禁用敌方单位的法术、主动技能和会触发召唤的被动，召唤出的部队到场即清除。军队技能无法禁用，炮击和增益类军队技能仍可能释放。关闭后恢复敌方技能。', true)
         fire_ui:SetTooltipText('AI 将军的射手和炮兵要不要避开友军。开：直接开火，不绕开友军，不找角度，友军身边的敌人照打。关：直射要有清晰火线，炮弹不落在友军身边。法术不受影响，设置长期保存。装了「关闭友军伤害」或「旧版全局弹道 / 爆炸覆盖」时默认开；后者只覆盖老内容，DLC23 之后的单位仍会误伤。', true)
         general_ui:SetTooltipText('点击在 关 / 全军 / 除主将外 / 仅援军 之间切换。部队仍在你手里：随时可以下令，你下的命令优先，15 秒内 AI 不再插手这支部队。', true)
-        doctrine_ui:SetTooltipText('自动：按敌我强弱决定固守或推进。进攻：立刻列阵推进。固守：只打靠近的敌人。原生 AI：交给游戏自带 AI，部队卡牌变灰；城墙攻防战默认用它。', true)
+        doctrine_ui:SetTooltipText('自动：按敌我强弱决定固守或推进。进攻：立刻列阵推进。固守：只打靠近的敌人。原生 AI：交给游戏自带 AI，部队卡牌变灰。城墙攻防战默认不托管，只有选原生 AI 才接手，有卡死风险。', true)
         pick_ui:SetTooltipText('单独交出或收回选中的部队，不受上面的模式限制，和快捷键效果相同。卡牌右上角绿点表示 AI 指挥中，黄点表示你刚接管。', true)
         key_ui:SetTooltipText('点一下，再按下想用的快捷键。Esc 或再点一次取消。只能用游戏里绑了功能的键，它原来的功能也会触发；想用没被占用的键，先在 选项 → 控制 里把它绑给一个空闲项（如 保存视角 5）。', true)
         status_ui = make(panel, 'status', 'label', 12, 236, 312, 22, last_status, 'hint')
@@ -786,6 +787,7 @@ local function new_battle_trainer(manager)
     function api.hotkey() return hotkey, capturing end
     function api.free_fire() return free_fire end
     general = new_general(manager, {data=GENERAL_DATA, log=log, report=report,
+        journal_file='wh3pt_general.log',
         free_cooldowns=function() return cooldown_on end,
         free_winds=function() return magic_on end,
         free_fire=function() return free_fire end,

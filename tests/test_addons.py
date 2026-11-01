@@ -9,7 +9,7 @@ from build_ingame import build_ingame, rebuild_ui_only
 from database import decode, encode
 from pack_io import read_pack
 from shop_addon import ITEMS, SHOP_FILENAME, SHOP_SCRIPT, TABLE_FIELDS, REMOVED_MAGIC_EFFECT, decode_loc, safe_shop_entries
-from trainer_core import GAME, Options, build
+from trainer_core import GAME, Options, VERSION, build
 from ballistic_addon import BALLISTIC_FILENAME, PRIMARY_KEYS, NUMERIC_FIELDS, BOOLEAN_FIELDS, safe_ballistic_entries
 from friendly_fire_addon import TABLES as FRIENDLY_TABLES, friendly_fire_entries
 
@@ -257,6 +257,7 @@ class BallisticMigrationTests(unittest.TestCase):
         battle = 'script\\battle\\mod\\wh3pt_battle.lua'
         plain, _ = build_ingame(local_dir=REFERENCE)
         self.assertIn(b'["friendly_fire_off"]=false', unpack(plain)[battle])
+        self.assertIn(b'["version"]="' + VERSION.encode() + b'"', unpack(plain)[battle])
         payload, _ = build_ingame(addons={'ballistic': True}, local_dir=REFERENCE)
         self.assertIn(b'["friendly_fire_off"]=true', unpack(payload)[battle])
         with tempfile.TemporaryDirectory() as tmp:

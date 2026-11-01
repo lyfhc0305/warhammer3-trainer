@@ -457,7 +457,7 @@ def ui_files(catalog, strategic=None, game=GAME, friendly_fire_off=False):
     ).encode('utf-8')}
     files['script\\battle\\mod\\wh3pt_battle.lua'] = (
         'local ENEMY_SUMMONS = ' + lua(enemy_summons(game)) + '\n'
-        + 'local GENERAL_DATA = ' + lua(dict(general_tables(game), friendly_fire_off=friendly_fire_off)) + '\n'
+        + 'local GENERAL_DATA = ' + lua(dict(general_tables(game), friendly_fire_off=friendly_fire_off, version=VERSION)) + '\n'
         + (ROOT / 'ingame/general.lua').read_text(encoding='utf-8') + '\n'
         + (ROOT / 'ingame/battle.lua').read_text(encoding='utf-8')
     ).encode('utf-8')

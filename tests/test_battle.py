@@ -14,6 +14,8 @@ class BattleCase(unittest.TestCase):
         self.lua.execute('''
             ENEMY_SUMMONS={passives={summon_on_death=true},units={skeletons_summoned=true,feral_cold_ones=true}}
             GENERAL_DATA={flags={},uses={},units={},abilities={}}
+            opened_files={}
+            function io.open(name) opened_files[#opened_files+1]=name end
             function collection(items)
                 return {count=function() return #items end, item=function(_,i) return items[i] end}
             end
@@ -1073,10 +1075,21 @@ class GeneralPanelTests(BattleCase):
         self.g.battle_clock = 1000
         self.g.timers.wh3pt_battle_general()
         self.g.common.selected[self.g.own.id] = True
-        self.g.battle_clock = 1500
+        self.g.battle_clock = 1700
         self.g.commands.Move()
         self.assertTrue(self.api.general.paused(self.g.own.id))
         self.assertFalse(self.api.general.paused(self.g.ordinary.id))
+
+    def test_the_echo_of_an_order_is_not_a_players_order(self):
+        self.battlefield()
+        self.open_panel()
+        self.click('general')
+        self.g.common.selected[self.g.own.id] = True
+        self.g.battle_clock = 1000
+        self.g.timers.wh3pt_battle_general()
+        self.g.battle_clock = 1300
+        self.g.commands.Move()
+        self.assertFalse(self.api.general.paused(self.g.own.id))
 
     def test_the_free_fire_button_switches_says_so_and_is_kept(self):
         self.open_panel()
@@ -1150,6 +1163,16 @@ class GeneralPanelTests(BattleCase):
         self.click('general_pick')
         self.assertEqual(self.api.status()[0], '先选中部队')
 
+    def test_the_commander_keeps_its_journal_in_its_own_file(self):
+        self.battlefield()
+        self.open_panel()
+        self.g.timers.wh3pt_battle_general()
+        self.assertEqual(len(self.g.opened_files), 0)
+        self.click('general')
+        self.g.battle_clock = 1000
+        self.g.timers.wh3pt_battle_general()
+        self.assertIn('wh3pt_general.log', list(self.g.opened_files.values()))
+
     def press(self, key):
         self.g.core.trigger_event(self.g.core, 'ShortcutTriggered', self.lua.table_from({'string': key}))
 
@@ -1157,6 +1180,22 @@ class GeneralPanelTests(BattleCase):
         self.battlefield()
         self.open_panel()
         self.g.common.selected[self.g.own.id] = True
+
+    def test_the_hotkey_says_why_it_does_nothing_in_a_walled_siege(self):
+        self.g.siege = True
+        self.g.battle_type = 'settlement_standard'
+        self.hotkey_panel()
+        self.press('camera_bookmark_save0')
+        self.assertFalse(self.api.general.managed(self.g.own.id))
+        self.assertIn('原生 AI', self.api.status()[0])
+        self.assertEqual(self.g.widgets.wh3pt_battle_open.text, '城墙战不托管')
+
+    def test_a_settlement_without_walls_is_no_walled_siege(self):
+        self.g.siege = True
+        self.g.battle_type = 'settlement_unfortified'
+        self.hotkey_panel()
+        self.press('camera_bookmark_save0')
+        self.assertTrue(self.api.general.managed(self.g.own.id))
 
     def test_shift_f9_hands_selected_units_over_and_takes_them_back(self):
         self.hotkey_panel()
@@ -1374,7 +1413,7 @@ class GeneralPanelTests(BattleCase):
         self.assertTrue(mark.visible)
         self.assertIsNone(self.g.other_card.Find(self.g.other_card, 'wh3pt_general_mark'))
         self.g.common.selected[self.g.own.id] = True
-        self.g.battle_clock = 1500
+        self.g.battle_clock = 1700
         self.g.commands.Move()
         self.g.timers.wh3pt_battle_general()
         self.assertEqual(mark.state, 'busy_dot')

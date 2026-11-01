@@ -36,7 +36,7 @@ function make_unit(side, key, x, z, extra)
         fighting=false, idle=true, visible=true, valid=true, deployed=true, controllable=true, rampaging=false,
         leaving=false, shot_at=false, wavering=false, class='inf_mel', attributes={}, behaviours={}, abilities={},
         lord=false, player=side == 'player', width=40, value=500, script_held=false, locked=false,
-        fast=false, shattered=false, fatigue='threshold_fresh'}
+        shattered=false, fatigue='threshold_fresh'}
     for k, value in pairs(extra or {}) do u[k] = value end
     function u:unique_ui_id() return self.id end
     function u:type() return self.key end
@@ -61,8 +61,8 @@ function make_unit(side, key, x, z, extra)
     function u:is_idle() return self.idle end
     function u:is_wavering() return self.wavering end
     function u:is_shattered() return self.shattered end
-    function u:is_moving_fast() return self.fast end
     function u:fatigue_state() return self.fatigue end
+    function u:number_of_enemies_killed() return self.kills or 0 end
     function u:is_left_flank_threatened() return self.left_threat ~= nil end
     function u:is_right_flank_threatened() return self.right_threat ~= nil end
     function u:is_rear_flank_threatened() return self.rear_unit ~= nil end
@@ -126,6 +126,9 @@ local function controller_for()
     function uc:fire_at_will(on) self.unit.behaviours.fire_at_will = on; self.unit.fire_changes = (self.unit.fire_changes or 0) + 1 end
     function uc:change_behaviour_active(name, on) self.unit.behaviours[name] = on end
     function uc:perform_special_ability(key, target)
+        -- As the engine does, whatever the docs say about the target being optional.
+        if not target then error("bad argument #1 to 'perform_special_ability' (battle.unit expected, got no value)") end
+        if refused_abilities[key] then error('ability refused') end
         local cast = {key=key, target=target, caster=self.unit, at=clock}
         casts[#casts + 1] = cast
     end
@@ -134,7 +137,7 @@ local function controller_for()
     end
     return uc
 end
-casts = {}
+casts, refused_abilities = {}, {}
 
 function make_army(player, items, extra)
     local a = {player=player, items=items, current=50, reinforcing=false}
@@ -176,6 +179,7 @@ reset_field()
 
 local planner = {}
 function planner:add_units(u)
+    if planner_hook then planner_hook(u) end
     if planner_refuses then error('unit is in a locked group') end
     planner_calls = planner_calls + 1
     planner_units[u.id] = u
@@ -187,6 +191,7 @@ end
 
 bm = {}
 function bm:time_elapsed_ms() return clock end
+function bm:battle_type() return 'land_normal' end
 function bm:is_conflict_phase() return is_conflict end
 function bm:is_any_cutscene_running() return in_cutscene end
 function bm:get_player_alliance()
