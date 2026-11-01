@@ -5,12 +5,13 @@ import tempfile
 import unittest
 
 from lupa.lua51 import LuaRuntime
-from build_ingame import build_ingame
+from build_ingame import build_ingame, rebuild_ui_only
 from database import decode, encode
 from pack_io import read_pack
 from shop_addon import ITEMS, SHOP_FILENAME, SHOP_SCRIPT, TABLE_FIELDS, REMOVED_MAGIC_EFFECT, decode_loc, safe_shop_entries
 from trainer_core import GAME, Options, build
 from ballistic_addon import BALLISTIC_FILENAME, PRIMARY_KEYS, NUMERIC_FIELDS, BOOLEAN_FIELDS, safe_ballistic_entries
+from friendly_fire_addon import TABLES as FRIENDLY_TABLES, friendly_fire_entries
 
 from tests import ROOT, SRC, REFERENCE
 
@@ -252,6 +253,17 @@ class BallisticMigrationTests(unittest.TestCase):
             self.assertTrue(set(keys).isdisjoint(self.native[table]))
         self.assertFalse(self.report['author_change_history_available'])
 
+    def test_the_battle_script_knows_when_friendly_fire_is_off(self):
+        battle = 'script\\battle\\mod\\wh3pt_battle.lua'
+        plain, _ = build_ingame(local_dir=REFERENCE)
+        self.assertIn(b'["friendly_fire_off"]=false', unpack(plain)[battle])
+        payload, _ = build_ingame(addons={'ballistic': True}, local_dir=REFERENCE)
+        self.assertIn(b'["friendly_fire_off"]=true', unpack(payload)[battle])
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'p.pack'
+            path.write_bytes(payload)
+            self.assertIn(b'["friendly_fire_off"]=true', unpack(rebuild_ui_only(path))[battle])
+
     def test_static_and_dynamic_use_identical_current_version_replacements(self):
         static, report = build(GAME, Options(local_mods=[BALLISTIC_FILENAME]), local_dir=REFERENCE)
         dynamic, _ = build_ingame(addons={'ballistic':True}, local_dir=REFERENCE)
@@ -281,6 +293,97 @@ class BallisticMigrationTests(unittest.TestCase):
         bad[name] = encode('battle_vortexs_tables', version, rows + [dict(rows[0])])
         with self.assertRaisesRegex(ValueError, '重复键'):
             safe_ballistic_entries(GAME, bad)
+
+
+class FriendlyFireTests(unittest.TestCase):
+    """Against the installed game: what the module changes and what it leaves alone."""
+    # What is left reaching allies: heals, a buff, and the shells that carry them.
+    HELPERS = {
+        'battle_vortexs_tables': {'wh2_dlc15_character_abilities_slimy_smoothie',
+                                  'wh3_dlc24_spell_hags_witchbrew_upgraded'},
+        'projectiles_explosions_tables': {'wh2_dlc14_lord_abilities_reaper_of_souls_miscast',
+                                          'wh2_dlc14_unit_abilities_doppelgang_miscast',
+                                          'wh2_main_army_abilities_vortic_enrichment',
+                                          'wh2_main_army_abilities_vortic_enrichment_shrapnel'},
+        'projectiles_tables': {'wh2_main_army_abilities_vortic_enrichment',
+                               'wh2_main_army_abilities_vortic_enrichment_shrapnel'},
+    }
+    DAMAGE = {'battle_vortexs_tables': ('damage', 'damage_ap'),
+              'projectiles_explosions_tables': ('detonation_damage', 'detonation_damage_ap'),
+              'projectiles_tables': ('damage', 'ap_damage')}
+
+    @classmethod
+    def setUpClass(cls):
+        cls.native, cls.versions = {}, {}
+        for table in FRIENDLY_TABLES:
+            for data in read_pack(Path(GAME)/'data/db.pack', lambda n, t=table: n.startswith('db\\' + t + '\\')).values():
+                cls.versions[table], rows = decode(table, data)
+                cls.native.setdefault(table, {}).update({r[FRIENDLY_TABLES[table][0]]:r for r in rows})
+        cls.shipped = cls.shipped_rows(friendly_fire_entries(GAME, {}))
+
+    @staticmethod
+    def shipped_rows(files):
+        found = {}
+        for name, data in files.items():
+            table = name.split('\\')[1] if name.startswith('db\\') else None
+            if table in FRIENDLY_TABLES:
+                found.setdefault(table, []).extend(decode(table, data)[1])
+        return found
+
+    def result(self, shipped):
+        return {table: {**self.native[table], **{r[FRIENDLY_TABLES[table][0]]:r for r in rows}}
+                for table, rows in shipped.items()}
+
+    def still_on(self, result):
+        return {table: {key for key, row in rows.items() if row[FRIENDLY_TABLES[table][1]]}
+                for table, rows in result.items()}
+
+    def test_only_what_helps_allies_still_reaches_them(self):
+        self.assertEqual(self.still_on(self.result(self.shipped)), self.HELPERS)
+
+    def test_what_still_reaches_allies_does_no_damage(self):
+        for table, keys in self.HELPERS.items():
+            for key in keys:
+                for column in self.DAMAGE[table]:
+                    self.assertFalse(self.native[table][key][column], key)
+
+    def test_nothing_but_the_flag_changes(self):
+        for table, rows in self.shipped.items():
+            key, flag, _ = FRIENDLY_TABLES[table]
+            for row in rows:
+                self.assertEqual(row, dict(self.native[table][row[key]], **{flag: False}), row[key])
+
+    def test_rows_that_never_hurt_allies_stay_out_of_the_pack(self):
+        for table, rows in self.shipped.items():
+            key, flag, _ = FRIENDLY_TABLES[table]
+            self.assertTrue(all(self.native[table][row[key]][flag] for row in rows))
+
+    def test_it_ships_at_the_versions_of_the_game(self):
+        for name, data in friendly_fire_entries(GAME, {}).items():
+            table = name.split('\\')[1]
+            self.assertEqual(decode(table, data)[0], self.versions[table])
+
+    def test_it_stands_alone_and_keeps_the_games_numbers(self):
+        payload, report = build_ingame(addons={'friendly_fire': True}, local_dir=REFERENCE)
+        self.assertEqual(report['addons'], ['friendly_fire'])
+        files = unpack(payload)
+        result = self.result(self.shipped_rows(files))
+        rocket = result['projectiles_tables']['wh3_main_cth_rocket']
+        self.assertEqual((rocket['effective_range'], rocket['can_damage_allies']), (400, False))
+        self.assertIn(b'["friendly_fire_off"]=true', files['script\\battle\\mod\\wh3pt_battle.lua'])
+
+    def test_on_top_of_the_ballistic_module_every_row_ships_once(self):
+        payload, report = build_ingame(addons={'ballistic': True, 'friendly_fire': True}, local_dir=REFERENCE)
+        self.assertEqual(set(report['addons']), {'ballistic', 'friendly_fire'})
+        shipped = self.shipped_rows(unpack(payload))
+        for table, rows in shipped.items():
+            keys = [row[FRIENDLY_TABLES[table][0]] for row in rows]
+            self.assertEqual(len(keys), len(set(keys)), table)
+        result = self.result(shipped)
+        # Friendly fire is off everywhere, heals the ballistic module cut off are back...
+        self.assertEqual(self.still_on(result), self.HELPERS)
+        # ...and its numbers survive.
+        self.assertEqual(result['projectiles_tables']['wh3_main_cth_rocket']['effective_range'], 360)
 
 
 class PanelStringCompatibilityTests(unittest.TestCase):

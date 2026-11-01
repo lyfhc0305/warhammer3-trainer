@@ -24,6 +24,7 @@ ADDON_SPECS = [
     ('agent_ai', '敌方间谍成功率减益', '按百分点降低 AI 事务官的行动成功率'),
     ('shop', '基斯里夫祈祷神器奖励', '支持军队／行省四神祈祷，启动时获神器；保留原生消耗与效果'),
     ('ballistic', '旧版全局弹道 / 爆炸覆盖', '兼容移植旧数值，含加强/削弱且影响敌方；旧独有键跳过'),
+    ('friendly_fire', '关闭友军伤害', '弹丸、爆炸和漩涡不再伤自己人，也影响敌方；治疗不受影响，数值不变'),
 ]
 ADDON_NAMES = {key: title for key, title, _ in ADDON_SPECS}
 assert tuple(ADDON_NAMES) == ADDON_KEYS

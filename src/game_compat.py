@@ -13,7 +13,7 @@ from pack_io import db_header, read_pack
 
 MANIFEST = 'wh3pt_build.json'
 # Optional modules an in-game pack can carry, and the parameter each one takes.
-ADDON_KEYS = ('building', 'cap', 'agent_ai', 'shop', 'ballistic')
+ADDON_KEYS = ('building', 'cap', 'agent_ai', 'shop', 'ballistic', 'friendly_fire')
 ADDON_VALUES = {'cap': 'cap_value', 'agent_ai': 'agent_ai_value'}
 
 

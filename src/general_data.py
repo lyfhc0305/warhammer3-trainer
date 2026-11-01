@@ -12,10 +12,10 @@ from pack_io import read_pack
 # Role flags, one bit each; battle's general.lua spells out the same names.
 FLAGS = {'ranged': 1, 'hybrid': 2, 'mage': 4, 'flanker': 8, 'shock': 16, 'anti_large': 32,
          'high': 64, 'arty': 128, 'large': 256, 'shield': 512, 'harasser': 1024, 'stalker': 2048,
-         'melee': 4096}
+         'melee': 4096, 'direct': 8192, 'brace': 16384}
 _ROLE_TOKENS = {'ranged': 'ranged', 'hybrid': 'hybrid', 'mage': 'mage', 'flanker': 'flanker',
                 'flankers': 'flanker', 'shock': 'shock', 'highvalue': 'high', 'arty': 'arty',
-                'harasser': 'harasser', 'stalkers': 'stalker', 'melee': 'melee'}
+                'harasser': 'harasser', 'stalkers': 'stalker', 'melee': 'melee', 'direct': 'direct'}
 _ROLE_PHRASES = {'anti_large': 'anti_large'}
 
 # Abilities a commander has no business firing: they move or remove the caster, or
@@ -68,7 +68,7 @@ def _suffix(key):
     return int(numbers[-1]) if numbers else 0
 
 
-def role_flags(group, ground, shield, category='artillery'):
+def role_flags(group, ground, shield, category='artillery', brace=False):
     flags = 0
     tokens = (group or '').split('_')
     for token in tokens:
@@ -85,11 +85,15 @@ def role_flags(group, ground, shield, category='artillery'):
         flags |= FLAGS['large']
     if shield and shield != 'none':
         flags |= FLAGS['shield']
+    if brace:
+        flags |= FLAGS['brace']
     return flags
 
 
 def unit_profiles(game):
-    """land unit key -> [flags, value, armour, ap%, bonus v large, bonus v infantry, missile block%]."""
+    """land unit key -> [flags, value, armour, bonus v large, bonus v infantry, missile block%,
+    attack, defence, charge, hit points per man, damage, armour piercing damage, seconds per blow,
+    men hit per blow, morale]."""
     weapons = {r['key']: r for r in _rows(game, 'melee_weapons_tables')}
     worth = {}
     for row in _rows(game, 'main_units_tables'):
@@ -98,14 +102,16 @@ def unit_profiles(game):
     result = {}
     for row in _rows(game, 'land_units_tables'):
         weapon = weapons.get(row['primary_melee_weapon']) or {}
-        damage, ap = weapon.get('damage') or 0, weapon.get('ap_damage') or 0
-        total = damage + ap
         result[row['key']] = [
-            role_flags(row['ai_usage_group'], row['ground_stat_effect_group'], row['shield'], row['category']),
+            role_flags(row['ai_usage_group'], row['ground_stat_effect_group'], row['shield'], row['category'],
+                       row['can_brace']),
             worth.get(row['key'], 0), _suffix(row['armour']),
-            int(round(100 * ap / total)) if total else 0,
             weapon.get('bonus_v_large') or 0, weapon.get('bonus_v_infantry') or 0,
             _suffix(row['shield']) if row['shield'] != 'none' else 0,
+            row['melee_attack'], row['melee_defence'], row['charge_bonus'], row['bonus_hit_points'],
+            weapon.get('damage') or 0, weapon.get('ap_damage') or 0,
+            round(weapon.get('melee_attack_interval') or 0, 1), weapon.get('splash_attack_max_attacks') or 1,
+            row['morale'],
         ]
     return result
 

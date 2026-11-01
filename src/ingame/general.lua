@@ -9,19 +9,38 @@ local GENERAL_TUNE = {
     casts_per_tick = 2,
     caster_gap = 3000,      -- ms between two casts of one unit
     mark_time = 12000,      -- a target just buffed or hexed is left alone this long
+    winds_window = 12000,   -- what was spent this long ago no longer counts against the budget
+    winds_floor = 12,       -- winds that may always be spent per window
+    winds_share = .4,       -- or this share of what the army has, if more
+    winds_spare = 20,       -- single target spells go on ordinary units above this
+    winds_overcast = 40,    -- overcasts are preferred from here
     player_pause = 15000,   -- an order from the player holds this long
-    hold_limit = 45000,     -- without contact, automatic holding ends after this
+    hold_limit = 150000,    -- holding ends when nothing has come closer for this long
     march_seconds = 15,     -- one marching step, so the line stays together
     contact = 75,           -- lines this close stop marching and pick targets
     short_step = 8,         -- a march step shorter than this is not worth an order
     charge = 70,            -- run from here
-    engage = 60,            -- holding units fight what comes this close
+    engage = 45,            -- holding units fight what comes this close
+    front_band = 20,        -- how deep behind its front the enemy line counts as the line
+    chase_reach = 40,       -- faster enemies further off than this are not worth chasing on foot
+    lag_limit = 150,        -- units this far behind the front run to catch up
     safe_gap = 22,          -- closer to a friend than this and a shot risks hitting them
-    keep_target = 1.4,      -- a new target must beat the old one by this much
+    clear_line = 14,        -- flat shots need this much room on either side of their line
+    flank_shot = 70,        -- degrees off the line a shooter goes to fire past a melee
+    keep_target = 1.6,      -- a new target must beat the old one by this much
     target_hold = 8000,     -- and the old one gets this long
     rest_hp = .3,           -- leaders pull out at this strength
     recover_hp = .45,       -- and return at this one
+    leader_edge = .7,       -- leaders only pick fights at this edge or better
+    caster_edge = 1.6,      -- casters that can fight only take on what they clearly beat
     flank_reach = 45,       -- metres to the side of a target when going around it
+    charge_hold = 9000,     -- shock cavalry rides out after this long in a melee
+    charge_gap = 20000,     -- and not again sooner than this
+    breakoff = 55,          -- how far it rides out
+    brace_range = 80,       -- spears stand when a charge comes from this close
+    brace_hold = 12000,     -- and give up on a charge that has not arrived after this
+    reserve_size = 8,       -- armies this big keep a reserve
+    reserve_time = 60000,   -- which goes in after this long at the latest
     fail_limit = 3,         -- ticks in a row that may fail before the commander stands down
 }
 -- What the ability bar of a unit can fire right now, as one comma separated string.
@@ -31,29 +50,38 @@ local function general_bits(flags, value)
     return flags % (value * 2) >= value
 end
 
--- Static facts about one unit. The game's tables say what it is for; units a mod added
--- after the build still work, from what the engine reports about them.
+-- Static facts about one unit. The game's tables say what it is for and what it can do;
+-- units a mod added after the build still work, from what the engine reports about them.
 local function general_profile(u, data)
     local row = data.units and data.units[u:type()]
     local names = data.flags or {}
     local p = {key=u:type()}
     if row then
         for name, bit in pairs(names) do p[name] = general_bits(row[1], bit) end
-        p.value, p.armour, p.ap, p.vs_large, p.vs_inf, p.block = row[2], row[3], row[4], row[5], row[6], row[7]
+        p.value, p.armour, p.vs_large, p.vs_inf, p.block = row[2], row[3], row[4], row[5], row[6]
+        p.attack, p.defence, p.charge, p.hp = row[7], row[8], row[9], row[10]
+        p.damage, p.ap_damage, p.interval, p.splash, p.morale = row[11], row[12], row[13], row[14], row[15]
     else
         local class = u:unit_class()
         p.ranged = class == 'inf_mis' or class == 'cav_mis'
         p.flanker = class == 'cav_mis' or class == 'cav_shk' or class == 'cav_mel' or class == 'chariot'
         p.shock = class == 'cav_shk'
         p.anti_large = u:is_anti_cavalry_infantry() or u:is_pikemen()
+        p.brace = p.anti_large
         p.mage = u:can_use_magic()
         p.large = u:is_cavalry() or u:is_chariot() or u:is_war_machine() or u:is_war_beasts()
         p.arty = u:is_artillery()
-        p.armour, p.ap, p.vs_large, p.vs_inf, p.block = 40, 30, 0, 0, 0
+        p.armour, p.vs_large, p.vs_inf, p.block = 40, 0, 0, 0
     end
     if not p.value or p.value <= 0 then p.value = math.max(200, u:strategic_value() or 0) end
     p.lord = u:is_commanding_unit()
-    p.single = u:initial_number_of_men() == 1
+    p.initial = math.max(1, u:initial_number_of_men())
+    p.single = p.initial == 1
+    p.attack, p.defence, p.charge = p.attack or 30, p.defence or 30, p.charge or 15
+    p.hp = p.hp and p.hp > 0 and p.hp or (p.single and 3000 or 70)
+    p.damage, p.ap_damage = p.damage or 20, p.ap_damage or 8
+    p.interval = p.interval and p.interval > 0 and p.interval or 4.5
+    p.splash = p.splash or (p.single and 4 or 1)
     p.speed, p.walk = u:fast_speed(), u:slow_speed()
     p.reach = u:missile_range() or 0
     p.fly = u:can_fly()
@@ -89,25 +117,27 @@ local function general_rear(attacker, target)
     return (1 - front) / 2
 end
 
--- Would this unit do well against that one in melee? Plain numbers from the tables.
-local function general_matchup(a, e)
+-- Damage per second from the game's own numbers: the chance to hit, what gets through the
+-- armour, how often, and how many men of a block can reach the enemy at once.
+local function general_blows(a, e)
     local s, t = a.s, e.s
-    local score = 1
-    if t.large then
-        score = score + a.s.vs_large / 25
-        if s.anti_large then score = score + .6 end
-        if s.single and not s.large then score = score - .1 end
-    else
-        score = score + s.vs_inf / 25
-        if s.large and not s.anti_large then score = score + .15 end
-    end
-    -- Armour only stops the part of a blow that is not armour piercing.
-    score = score * (1 - (1 - s.ap / 100) * math.min(t.armour, 150) / 300)
-    -- A horse does not charge a spear wall, unless the spears are busy with someone else.
-    if s.large and t.spear and not s.single then
-        score = score * (e.fighting and .8 or .35)
-    end
-    return score
+    local bonus = t.large and s.vs_large or s.vs_inf
+    local hit = math.max(8, math.min(90, 35 + s.attack + bonus - t.defence)) / 100
+    local stopped = math.min(1, t.armour / 100) * .75
+    local blow = (s.damage + bonus) * (1 - stopped) + s.ap_damage
+    local men = s.single and 1 or math.max(1, a.men) ^ .75
+    return hit * blow * (t.large and 1 or s.splash) / s.interval * men
+end
+
+local function general_toughness(rec)
+    return rec.s.hp * rec.s.initial * math.max(.05, rec.strength)
+end
+
+-- Above 1 this unit wins the exchange, below 1 it loses it.
+local function general_edge(a, e)
+    local needed = general_toughness(e) / math.max(1, general_blows(a, e))
+    local left = general_toughness(a) / math.max(1, general_blows(e, a))
+    return math.max(.33, math.min(3, left / needed))
 end
 
 local function general_can_melee(a, e)
@@ -117,27 +147,33 @@ local function general_can_melee(a, e)
     return not s.always_fly
 end
 
-local function general_melee_score(a, e, load)
+-- Reasons to go for one enemy rather than another, whoever does the fighting.
+local function general_melee_score(a, e, load, field)
     local distance = general_dist(a, e)
-    -- Rooted, so that worth weighs in without drowning the matchup and the distance.
-    local score = math.sqrt(e.worth) * general_matchup(a, e)
+    -- Whether the fight can be won comes first, worth only tips the balance. Rooted, so
+    -- that an easy target does not pull a whole line away from what stands in front of it.
+    local score = general_edge(a, e) ^ .6 * e.worth ^ .25
+    -- A horse does not charge a spear wall, unless the spears are busy with someone else.
+    if a.s.large and e.s.spear and not a.s.single then score = score * (e.fighting and .8 or .35) end
     if e.routing then score = score * .15 end
     if e.fighting then
         -- Help whoever is already fighting it, and hit it from where it is not looking.
         score = score * (1.25 + general_rear(a, e) * .9)
     end
     if e.threatens_support then score = score * 1.7 end
-    if e.s.arty then score = score * 1.3 end
-    if e.s.shooter and e.near > 30 then score = score * 1.25 end
+    if e.flanking then score = score * 1.5 end
+    if e.wavering then score = score * 1.4 end
     -- Finish what is nearly broken, it frees a whole unit.
     score = score * (1.4 - e.strength * .4)
     score = score / (1 + (load[e.id] or 0) * .55)
-    return score / (1 + distance / (math.max(1, a.s.speed) * 12)), distance
+    -- Straight ahead is closer than sideways: units crossing paths leave gaps in the line.
+    local aside = math.abs((e.x - a.x) * field.az - (e.z - a.z) * field.ax)
+    return score / (1 + (distance + aside * .6) / (math.max(1, a.s.speed) * 12)), distance
 end
 
 -- Cavalry and flyers go for what infantry cannot reach in time.
-local function general_flank_score(a, e, load)
-    local score, distance = general_melee_score(a, e, load)
+local function general_flank_score(a, e, load, field)
+    local score, distance = general_melee_score(a, e, load, field)
     if e.s.arty then score = score * 2.2 end
     if e.s.shooter and not e.fighting then score = score * 1.8 end
     if e.s.mage and e.s.single then score = score * 1.5 end
@@ -146,7 +182,7 @@ local function general_flank_score(a, e, load)
     return score, distance
 end
 
-local function general_shot_score(a, e, load)
+local function general_shot_score(a, e, load, field)
     local s, t = a.s, e.s
     local distance = general_dist(a, e)
     local score = math.sqrt(e.worth)
@@ -156,22 +192,52 @@ local function general_shot_score(a, e, load)
     if t.shooter or t.arty then score = score * 1.6 end
     if t.mage and t.single then score = score * 1.4 end
     if e.routing then score = score * .2 end
-    if s.arty then
+    if e.wavering then score = score * 1.3 end
+    if s.arty and s.direct then
+        -- A cannon ball goes through one thing: the bigger the better.
+        if t.large then score = score * (t.single and 1.8 or 1.4)
+        else score = score * (.5 + .5 * math.min(e.men, 100) / 100) end
+    elseif s.arty then
         -- Shells are wasted on anything small or fast.
         if t.single then score = score * .5 end
         if t.large and not t.arty then score = score * .8 end
         score = score * (.6 + .4 * math.min(e.men, 100) / 100)
     end
+    -- A free target beats one tied up with friends, whatever the angle.
+    if e.near < GENERAL_TUNE.safe_gap and not field.free_fire then score = score * .6 end
     -- A few volleys finish a battered unit, a whole line of archers should not need to.
     score = score * (1.5 - e.strength * .5)
     score = score / (1 + (load[e.id] or 0) * .45)
     return score / (1 + distance / 400), distance
 end
 
--- A target is safe to shoot when nobody of ours stands in the way of the fall of shot.
--- Large single targets are hit rather than the men around them.
-local function general_safe_shot(e, tune)
-    return e.near >= tune.safe_gap or (e.s.single and e.s.large)
+-- Is there a friend on the line of fire?
+local function general_line_blocked(a, e, friends)
+    local dx, dz = e.x - a.x, e.z - a.z
+    local length = math.max(1, math.sqrt(dx * dx + dz * dz))
+    for _, f in ipairs(friends) do
+        if f ~= a and not f.flying then
+            local fx, fz = f.x - a.x, f.z - a.z
+            local along = (fx * dx + fz * dz) / length
+            local aside = math.abs(fx * dz - fz * dx) / length
+            if along > 0 and along < length and aside < GENERAL_TUNE.clear_line then
+                -- Right by the target only the angle matters: from 60 degrees off the
+                -- shot passes along the fight instead of through it.
+                local short = length - along
+                if short > 12 or short / math.max(1, math.sqrt(short * short + aside * aside)) > .5 then return true end
+            end
+        end
+    end
+    return false
+end
+
+-- Flat shots hit whoever stands in the way, so they need an open line. Arcing shots from
+-- behind or beside our own men come down on the enemy. Shells are never dropped next to
+-- friends, and large single targets are hit rather than the men around them.
+local function general_safe_shot(a, e, friends)
+    if a.s.direct and not a.flying and not a.s.arty and general_line_blocked(a, e, friends) then return false end
+    if e.near >= GENERAL_TUNE.safe_gap or (e.s.single and e.s.large) then return true end
+    return not a.s.arty
 end
 
 local function new_general(manager, env)
@@ -184,7 +250,8 @@ local function new_general(manager, env)
     local locked, resting, ours, starters, cast_at, marked, ready_at, used = {}, {}, {}, {}, {}, {}, {}, {}
     local planner, planned, issuing, issuing_at, late_echoes = nil, {}, false, -1, false
     local failures, status, counts = 0, '未托管', {orders=0, casts=0}
-    local attacker, begun, march_at = false, false, -60000
+    local attacker, begun, march_at, hold_gap = false, false, -60000, 9999
+    local fight_since, broke_at, braced, spending, reserves = {}, {}, {}, {}, nil
     local function now() return manager:time_elapsed_ms() end
     local function log(text) if env.log then env.log(text) end end
     local function alliance() return manager:get_player_alliance() end
@@ -206,6 +273,7 @@ local function new_general(manager, env)
         return {id=id, u=u, s=s, x=p:get_x(), z=p:get_z(), men=u:number_of_men_alive(), strength=strength,
             facing=u:bearing(), worth=s.value * (.35 + .65 * strength), routing=u:is_routing(),
             fighting=u:is_in_melee(), flying=u:is_currently_flying(), shot_at=u:is_under_missile_attack(),
+            wavering=u:is_wavering(), shattered=u:is_shattered(), fast=u:is_moving_fast(),
             near=9999, friend=friend}
     end
     -- Everything that is standing, on both sides, read once per tick.
@@ -237,7 +305,8 @@ local function new_general(manager, env)
         local unseen = {}
         local enemies = read_side(manager:get_non_player_alliance():armies(), false, mine, unseen)
         local field = {friends=friends, enemies=enemies, managed={}, standing={}, by_id={}, infantry=0,
-            fights=0, under_fire=0, our_shots=0, their_shots=0, our_power=0, their_power=0}
+            fights=0, under_fire=0, our_shots=0, their_shots=0, our_power=0, their_power=0,
+            free_fire=env.free_fire and env.free_fire()}
         local cx, cz, count = 0, 0, 0
         for _, rec in ipairs(friends) do
             if not rec.routing then
@@ -284,7 +353,7 @@ local function new_general(manager, env)
     end
     -- Who is near whom. Everything else is decided from these numbers.
     local function measure(field)
-        local front, enemy_front = -9999, 9999
+        local front, enemy_front, any_front = -9999, 9999, 9999
         for _, rec in ipairs(field.friends) do
             if not rec.routing then
                 if field.ax and not rec.s.shooter and not rec.s.arty and not rec.s.mage then
@@ -301,18 +370,54 @@ local function new_general(manager, env)
                 end
             end
         end
+        -- Skirmishers, horsemen and lone heroes out in front are not the enemy line.
         for _, e in ipairs(field.standing) do
-            if field.ax then enemy_front = math.min(enemy_front, along(field, e)) end
+            e.along = along(field, e)
+            any_front = math.min(any_front, e.along)
+            local t = e.s
+            if not (t.harasser or t.shooter or t.arty or t.single or t.flanker) then
+                enemy_front = math.min(enemy_front, e.along)
+            end
+        end
+        if enemy_front == 9999 then enemy_front = any_front end
+        for _, rec in ipairs(field.friends) do
+            rec.along = along(field, rec)
         end
         for _, rec in ipairs(field.managed) do
-            rec.nearest, rec.nearest_dist = nil, 9999
+            rec.nearest, rec.nearest_dist, rec.threat, rec.threat_dist = nil, 9999, nil, 9999
             for _, e in ipairs(field.standing) do
                 local distance = general_dist(rec, e)
                 if distance < rec.nearest_dist then rec.nearest, rec.nearest_dist = e, distance end
+                -- Nothing busy with our line, or standing off to shoot, is coming for this unit.
+                if distance < rec.threat_dist and not e.fighting and not e.s.shooter and not e.s.arty then
+                    rec.threat, rec.threat_dist = e, distance
+                end
             end
         end
         field.front, field.enemy_front = front, enemy_front
         field.gap = enemy_front - (front > -9999 and front or 0)
+    end
+    -- Who is working around our flanks, and who is making for the men who cannot fight back.
+    local function note_threats(field)
+        local function mark(u)
+            local e = u and field.by_id[u:unique_ui_id()]
+            if e then e.flanking = true end
+        end
+        local ids = {}
+        for _, rec in ipairs(field.friends) do
+            ids[rec.id] = rec
+            if not rec.routing then
+                local u = rec.u
+                if u:is_left_flank_threatened() then mark(u:left_flank_threat()) end
+                if u:is_right_flank_threatened() then mark(u:right_flank_threat()) end
+                if u:is_rear_flank_threatened() then mark(u:rear_threat()) end
+            end
+        end
+        for _, e in ipairs(field.standing) do
+            local target = e.near < 150 and e.u:current_target()
+            local rec = target and ids[target:unique_ui_id()]
+            if rec and (rec.s.shooter or rec.s.arty or rec.s.mage or rec.s.lord) then e.threatens_support = true end
+        end
     end
 
     -- Orders ------------------------------------------------------------------------
@@ -389,18 +494,18 @@ local function new_general(manager, env)
     local function sticky(rec, field, best, best_score, score_of, load, allowed)
         local old = plans[rec.id]
         local current = old and old.target and field.by_id[old.target]
-        if not current or current.routing or not best or not allowed(rec, current) then return best end
+        if not current or current.routing or not best or not allowed(rec, current, field) then return best end
         if current.id == best.id then return best end
-        local kept = score_of(rec, current, load)
+        local kept = score_of(rec, current, load, field)
         if now() - (old.since or 0) < T.target_hold or best_score < kept * T.keep_target then return current end
         return best
     end
     local function pick(rec, field, load, score_of, allowed)
-        local best, best_score, best_distance = nil, 0, 0
+        local best, best_score = nil, 0
         for _, e in ipairs(field.standing) do
-            if allowed(rec, e) then
-                local score, distance = score_of(rec, e, load)
-                if score > best_score then best, best_score, best_distance = e, score, distance end
+            if allowed(rec, e, field) then
+                local score = score_of(rec, e, load, field)
+                if score > best_score then best, best_score = e, score end
             end
         end
         return sticky(rec, field, best, best_score, score_of, load, allowed)
@@ -409,17 +514,56 @@ local function new_general(manager, env)
         load[e.id] = (load[e.id] or 0) + 1
         return e
     end
+    -- Arrows on a unit are no reason for the infantry to leave it alone, so they count apart.
+    local function claims_of(plan, field, load)
+        return plan.ranged and field.fire or load
+    end
     -- Units that can also shoot have to be told to close in.
     local function melee_order(rec, e, run)
         local plan = attack(e, run)
         if rec.s.has_ammo then plan.ranged = false end
         return plan
     end
-    local function plan_melee(rec, field, load)
-        local e = pick(rec, field, load, general_melee_score, general_can_melee)
+    -- Far behind the front a unit runs: the fight will not wait for it.
+    local function lagging(rec, field)
+        return field.front > -9999 and field.front - rec.along > T.lag_limit
+    end
+    -- On foot there is no catching what is faster, unless it stands and fights.
+    local function catchable(rec, e)
+        if not general_can_melee(rec, e) then return false end
+        return e.fighting or e.s.speed <= rec.s.speed * 1.2 or general_dist(rec, e) <= T.chase_reach
+    end
+    -- The line fights the line. What stands behind it is for the cavalry, unless it is
+    -- already in reach of something that must be protected.
+    local function line_target(rec, e, field)
+        if not catchable(rec, e) then return false end
+        if e.fighting or e.threatens_support or e.flanking then return true end
+        if (e.s.shooter or e.s.arty) and general_dist(rec, e) > T.chase_reach then return false end
+        return e.along <= field.enemy_front + T.front_band
+    end
+    local function plan_melee(rec, field, load, allowed)
+        local e = pick(rec, field, load, general_melee_score, allowed or line_target)
+        if not e and not allowed then e = pick(rec, field, load, general_melee_score, catchable) end
         if not e then return end
         claim(load, e)
-        return melee_order(rec, e, general_dist(rec, e) <= T.charge)
+        return melee_order(rec, e, general_dist(rec, e) <= T.charge or lagging(rec, field))
+    end
+    local function winnable(rec, e, field)
+        return line_target(rec, e, field) and general_edge(rec, e) >= T.leader_edge
+    end
+    -- A leader picks fights it wins and otherwise stays close to its men, where its aura counts.
+    local function plan_leader(rec, field, load)
+        local plan = plan_melee(rec, field, load, winnable)
+        if plan then return plan end
+        local nearest, nearest_dist = nil, 9999
+        for _, friend in ipairs(field.friends) do
+            if friend.fighting and friend ~= rec and general_dist(rec, friend) < nearest_dist then
+                nearest, nearest_dist = friend, general_dist(rec, friend)
+            end
+        end
+        if nearest and nearest_dist > 30 then
+            return move(nearest.x - field.ax * 20, nearest.z - field.az * 20, true)
+        end
     end
     -- From the front a flanker would ride straight into the line, so it goes around
     -- first. Only worth the time when it is not already close.
@@ -436,6 +580,7 @@ local function new_general(manager, env)
     local function plan_flanker(rec, field, load)
         local allowed = function(a, e)
             if not general_can_melee(a, e) then return false end
+            if a.s.single and a.s.high and general_edge(a, e) < T.leader_edge then return false end
             -- Before the lines meet only what stands exposed is worth riding out for.
             return field.free_charge or e.s.arty or (e.s.shooter and e.near > 40)
         end
@@ -459,8 +604,11 @@ local function new_general(manager, env)
     local function in_range(rec, e)
         return general_dist(rec, e) <= rec.s.reach * 1.05 and rec.u:unit_in_range(e.u)
     end
-    local function clear_shot(rec, e)
-        return general_safe_shot(e, T) and in_range(rec, e)
+    -- With friendly fire off nothing stands in the way, so nobody holds fire or walks for an angle.
+    local function clear_shot(rec, e, field)
+        return general_dist(rec, e) <= rec.s.reach * 1.05
+            and (field.free_fire or general_safe_shot(rec, e, field.friends))
+            and rec.u:unit_in_range(e.u)
     end
     local function hold_fire(rec, value)
         local record = adopted[rec.id]
@@ -470,7 +618,7 @@ local function new_general(manager, env)
         record.holding, record.fire_at = value, now()
         command(rec, function(uc) uc:fire_at_will(not value and record.fire_at_will ~= false) end)
     end
-    -- Is everything in range tied up with friends? Better no shot than a shot in the back.
+    -- Is something in range that may not be shot at? Better no shot than a shot in the back.
     local function tied_up(rec, field)
         for _, e in ipairs(field.standing) do
             if in_range(rec, e) then return true end
@@ -482,18 +630,19 @@ local function new_general(manager, env)
         local old = plans[rec.id]
         if old and old.kind == 'attack' and old.ranged then return {kind='halt', urgent=true} end
     end
-    local function plan_artillery(rec, field, load)
+    local function plan_artillery(rec, field)
         if rec.u:ammo_left() == 0 then return end
-        local e = pick(rec, field, load, general_shot_score, clear_shot)
+        local e = pick(rec, field, field.fire, general_shot_score, clear_shot)
         local risky = not e and tied_up(rec, field)
         hold_fire(rec, risky)
-        if e then claim(load, e); return attack(e, false, true) end
+        if e then claim(field.fire, e); return attack(e, false, true) end
         if risky then return cease_fire(rec) end
     end
     -- Keep within reach of the fight, but behind the men doing it.
     local function close_in(rec, field, reach)
-        local e = rec.nearest
+        local e, old = rec.nearest, plans[rec.id]
         if not e or rec.nearest_dist <= reach or rec.s.fixed then return end
+        if old and old.kind == 'move' and not rec.u:is_idle() then return old end
         local room = rec.nearest_dist - reach + 5
         local ux, uz = (e.x - rec.x) / rec.nearest_dist, (e.z - rec.z) / rec.nearest_dist
         local x, z = rec.x + ux * room, rec.z + uz * room
@@ -501,13 +650,30 @@ local function new_general(manager, env)
             local ahead = (x - field.cx) * field.ax + (z - field.cz) * field.az - (field.front - 8)
             if ahead > 0 then x, z = x - field.ax * ahead, z - field.az * ahead end
         end
-        if math.abs(x - rec.x) + math.abs(z - rec.z) >= 12 then return move(x, z, false) end
+        -- Well behind the men it runs: the best moment for a spell is before they meet.
+        if math.abs(x - rec.x) + math.abs(z - rec.z) >= 12 then
+            return move(x, z, field.front > -9999 and field.front - rec.along > 60)
+        end
+    end
+    -- A blocked line of fire opens from the side: walk to the end of the line and shoot
+    -- along the fight. Not into the arms of anything that is still free.
+    local function find_angle(rec, field)
+        local old, e = plans[rec.id], rec.nearest
+        if rec.s.fixed or not e then return end
+        if old and old.kind == 'move' and not rec.u:is_idle() then return old end
+        local sx, sz = field.az, -field.ax
+        local side = (rec.x - e.x) * sx + (rec.z - e.z) * sz >= 0 and 1 or -1
+        local reach, angle = rec.s.reach * .75, math.rad(T.flank_shot)
+        local x = e.x + sx * side * reach * math.sin(angle) - field.ax * reach * math.cos(angle)
+        local z = e.z + sz * side * reach * math.sin(angle) - field.az * reach * math.cos(angle)
+        if rec.threat and general_dist({x=x, z=z}, rec.threat) < 40 then return end
+        if rec.u:can_reach_position(ground(x, z)) then return move(x, z, false) end
     end
     -- Backs away from what is about to reach it, unless that is faster anyway.
     local function back_away(rec, field)
-        local e = rec.nearest
-        if not e or rec.fighting or rec.nearest_dist >= 35 or e.s.speed > rec.s.speed * 1.25 then return end
-        local spread = math.max(1, rec.nearest_dist)
+        local e = rec.threat
+        if not e or rec.fighting or rec.threat_dist >= 35 or e.s.speed > rec.s.speed * 1.25 then return end
+        local spread = math.max(1, rec.threat_dist)
         local ux, uz = (rec.x - e.x) / spread, (rec.z - e.z) / spread
         local plan = move(rec.x + ux * 50 - field.ax * 20, rec.z + uz * 50 - field.az * 20, true)
         plan.urgent = true
@@ -520,23 +686,32 @@ local function new_general(manager, env)
             if s.no_melee or (phase ~= 'battle' and rec.nearest_dist > T.engage) then return end
             return plan_melee(rec, field, load)
         end
-        if s.hybrid and rec.nearest_dist < 35 and not s.no_melee then return plan_melee(rec, field, load) end
+        if s.hybrid and rec.threat_dist < 35 and not s.no_melee then return plan_melee(rec, field, load) end
         local flee = not s.hybrid and back_away(rec, field)
         if flee then return flee end
-        local best = pick(rec, field, load, general_shot_score, clear_shot)
-        local risky = not best and tied_up(rec, field)
-        hold_fire(rec, risky)
+        local best = pick(rec, field, field.fire, general_shot_score, clear_shot)
+        local blocked = not best and tied_up(rec, field)
+        hold_fire(rec, blocked)
         if best then
-            claim(load, best)
+            claim(field.fire, best)
             return attack(best, false, true)
         end
-        if risky then return cease_fire(rec) end
+        if blocked then return cease_fire(rec) or find_angle(rec, field) end
         if phase == 'battle' then return close_in(rec, field, s.reach * .9) end
     end
-    local function plan_caster(rec, field)
+    local function soft_target(rec, e, field)
+        return line_target(rec, e, field) and general_dist(rec, e) <= T.engage and general_edge(rec, e) >= T.caster_edge
+    end
+    -- A caster lives by its spells. One that can also fight only takes on what it clearly
+    -- beats, and only while it is healthy.
+    local function plan_caster(rec, field, load)
+        if phase == 'battle' and rec.s.melee and rec.strength > .6 then
+            local plan = plan_melee(rec, field, load, soft_target)
+            if plan then return plan end
+        end
         local flee = back_away(rec, field)
         if flee then return flee end
-        if phase ~= 'hold' then return close_in(rec, field, (rec.s.reach_spell or 130) * .8) end
+        if phase ~= 'hold' then return close_in(rec, field, (rec.s.reach_spell or 130) * .85) end
     end
     -- Leaders are worth more alive than in one more exchange of blows.
     local function needs_rest(rec, field)
@@ -561,6 +736,11 @@ local function new_general(manager, env)
     end
     -- Keeps the deployed formation: everyone takes the same step towards the enemy.
     local function plan_march(rec, field)
+        if lagging(rec, field) then
+            if not field.march and not rec.u:is_idle() then return end
+            local catch_up = field.front - rec.along - T.contact
+            return move(rec.x + field.ax * catch_up, rec.z + field.az * catch_up, true)
+        end
         local room = field.gap - T.contact
         if not field.march or room < T.short_step or rec.s.fixed then return end
         local step = math.min(room, math.max(30, math.min(90, field.pace * T.march_seconds)))
@@ -576,7 +756,7 @@ local function new_general(manager, env)
         if old and old.target and field.by_id[old.target] and not rec.u:is_idle() then return end
         if s.has_ammo and rec.u:ammo_left() ~= 0 then
             for _, e in ipairs(field.enemies) do
-                if clear_shot(rec, e) then return attack(e, false, true) end
+                if clear_shot(rec, e, field) then return attack(e, false, true) end
             end
         end
         if s.no_melee then return end
@@ -585,29 +765,86 @@ local function new_general(manager, env)
             if general_can_melee(rec, e) then
                 local distance = general_dist(rec, e)
                 if s.speed >= e.s.speed * 1.05 or distance < 30 then
-                    local score = (100 + e.worth) / (1 + (load[e.id] or 0)) / (1 + distance / 60)
+                    -- The shattered are gone anyway, those who can still rally are not.
+                    local score = (100 + e.worth) * (e.shattered and .6 or 1) / (1 + (load[e.id] or 0)) / (1 + distance / 60)
                     if score > best_score then best, best_score = e, score end
                 end
             end
         end
         if best then claim(load, best); return melee_order(rec, best, true) end
     end
+    -- Spears stand and take a charge: running out to meet it throws the bonus away. A charge
+    -- that does not arrive is given up on, or the spears would stand there all day.
+    local function plan_brace(rec, field)
+        if not (rec.s.spear and rec.s.brace) then return end
+        for _, e in ipairs(field.standing) do
+            if e.s.large and e.fast and not e.fighting and not e.flying and general_dist(rec, e) <= T.brace_range
+                and general_rear(rec, e) < .2 then
+                braced[rec.id] = braced[rec.id] or now()
+                if now() - braced[rec.id] > T.brace_hold then return end
+                local width = rec.u:ordered_width()
+                local plan = move(rec.x, rec.z, false, general_bearing(e.x - rec.x, e.z - rec.z),
+                    width and width > 0 and width or nil)
+                plan.urgent = true
+                return plan
+            end
+        end
+        braced[rec.id] = nil
+    end
+    local function plan_fight(rec, field, load)
+        if rec.s.flanker then return plan_flanker(rec, field, load) end
+        if rec.s.single and rec.s.high then return plan_leader(rec, field, load) end
+        return plan_melee(rec, field, load)
+    end
     local function plan_role(rec, field, load)
         local s = rec.s
-        if s.arty then return plan_artillery(rec, field, load) end
-        if s.shooter or (s.mage and not s.melee) then
+        if s.arty then return plan_artillery(rec, field) end
+        if s.shooter or s.mage then
             local plan
-            if s.shooter then plan = plan_shooter(rec, field, load) else plan = plan_caster(rec, field) end
+            if s.shooter then plan = plan_shooter(rec, field, load) else plan = plan_caster(rec, field, load) end
             if plan or phase ~= 'advance' then return plan end
             return plan_march(rec, field)
         end
-        if phase == 'advance' then return plan_march(rec, field) end
+        local stand = plan_brace(rec, field)
+        if stand then return stand end
+        if phase == 'advance' then
+            -- Marching on is no answer to something about to hit the column.
+            if rec.threat_dist <= T.engage then return plan_fight(rec, field, load) end
+            return plan_march(rec, field)
+        end
         if phase == 'hold' then
             if not rec.nearest or rec.nearest_dist > T.engage then return end
-            return plan_melee(rec, field, load)
+            return rec.s.single and rec.s.high and plan_leader(rec, field, load) or plan_melee(rec, field, load)
         end
-        if s.flanker then return plan_flanker(rec, field, load) end
-        return plan_melee(rec, field, load)
+        return plan_fight(rec, field, load)
+    end
+    -- Cavalry does its damage in the charge, so it rides out and comes again. Not from a
+    -- unit about to break, and not on blown horses.
+    local function plan_breakoff(rec, field)
+        local s = rec.s
+        local e, since = rec.nearest, fight_since[rec.id]
+        if not (s.shock and s.flanker) or s.single or not e or not since then return end
+        if e.routing or e.wavering or e.strength < .3 then return end
+        if now() - since < (e.s.spear and T.charge_hold / 2 or T.charge_hold) then return end
+        if now() - (broke_at[rec.id] or -T.charge_gap) < T.charge_gap then return end
+        local fatigue = rec.u:fatigue_state()
+        if fatigue == 'threshold_very_tired' or fatigue == 'threshold_exhausted' then return end
+        local spread = math.max(1, rec.nearest_dist)
+        local x, z = rec.x + (rec.x - e.x) / spread * T.breakoff, rec.z + (rec.z - e.z) / spread * T.breakoff
+        if not rec.u:can_reach_position(ground(x, z)) then return end
+        broke_at[rec.id] = now()
+        local plan = move(x, z, true)
+        plan.target, plan.urgent = e.id, true
+        return plan
+    end
+    -- Out of the way, close enough to matter.
+    local function plan_reserve(rec, field)
+        local behind, old = field.front - rec.along, plans[rec.id]
+        if field.front > -9999 and behind > 120 then
+            if old and old.kind == 'move' and not rec.u:is_idle() then return old end
+            local up = behind - 70
+            return move(rec.x + field.ax * up, rec.z + field.az * up, false)
+        end
     end
     -- Orders from before a change of doctrine would otherwise walk on.
     local function stop_running(rec)
@@ -617,7 +854,11 @@ local function new_general(manager, env)
     local function plan_for(rec, field, load)
         if phase == 'pursuit' then return plan_chase(rec, field, load) end
         if needs_rest(rec, field) then return plan_rest(rec, field) end
-        if rec.fighting then return end
+        if rec.fighting then
+            if reserves then reserves[rec.id] = nil end
+            return plan_breakoff(rec, field)
+        end
+        if reserves and reserves[rec.id] then return plan_reserve(rec, field) end
         local plan = plan_role(rec, field, load)
         if not plan and phase == 'hold' then return stop_running(rec) end
         return plan
@@ -651,17 +892,45 @@ local function new_general(manager, env)
             end
         end
     end
+    -- A company of horse and one of foot stay out until they are needed.
+    local function pick_reserves(field)
+        if reserves or phase ~= 'battle' then return end
+        reserves = {}
+        if #field.managed < T.reserve_size then return end
+        local horse, foot
+        for _, rec in ipairs(field.managed) do
+            local s = rec.s
+            if not (rec.fighting or s.shooter or s.arty or s.mage or s.single) then
+                if s.flanker then
+                    if not horse or s.speed > horse.s.speed then horse = rec end
+                elseif not foot or rec.along < foot.along then
+                    foot = rec
+                end
+            end
+        end
+        if horse then reserves[horse.id] = true end
+        if foot then reserves[foot.id] = true end
+    end
+    local function release_reserves(field)
+        if not reserves or not next(reserves) then return end
+        local needed = field.fights * 2 >= #field.friends or now() - phase_at > T.reserve_time
+        for _, e in ipairs(field.standing) do
+            needed = needed or e.flanking or e.threatens_support
+        end
+        if needed then reserves = {} end
+    end
     local function command_units(field)
         field.orders = 0
         local load = {}
-        field.pace = 99
+        field.fire, field.pace = {}, 99
+        pick_reserves(field)
+        release_reserves(field)
         for _, rec in ipairs(field.managed) do
             adopt(rec)
+            if rec.fighting then fight_since[rec.id] = fight_since[rec.id] or now() else fight_since[rec.id] = nil end
             if not rec.s.arty and rec.s.walk > 0 then field.pace = math.min(field.pace, rec.s.walk) end
             local plan = plans[rec.id]
-            if plan and plan.target and field.by_id[plan.target] then
-                load[plan.target] = (load[plan.target] or 0) + 1
-            end
+            if plan and plan.target and field.by_id[plan.target] then claim(claims_of(plan, field, load), field.by_id[plan.target]) end
         end
         field.order_limit = field.march and #field.managed or T.orders_per_tick
         field.free_charge = field.fights > 0 or field.infantry == 0 or phase == 'pursuit'
@@ -675,7 +944,8 @@ local function new_general(manager, env)
             if can_order(rec) then
                 local old = plans[rec.id]
                 if old and old.target and field.by_id[old.target] and not rec.fighting then
-                    load[old.target] = load[old.target] - 1
+                    local claims = claims_of(old, field, load)
+                    claims[old.target] = claims[old.target] - 1
                 end
                 local plan = plan_for(rec, field, load)
                 if plan then order(rec, plan, field) end
@@ -696,10 +966,15 @@ local function new_general(manager, env)
             end
         end
         rec.s.abilities, rec.s.abilities_at = list, now() + 10000
-        rec.s.reach_spell = nil
+        -- A caster stands where its shortest attack spell reaches: the long ones reach anyway.
+        local shortest, longest = nil, 0
         for _, ability in ipairs(list) do
-            if ability.range > (rec.s.reach_spell or 0) then rec.s.reach_spell = ability.range end
+            longest = math.max(longest, ability.range)
+            local attack_spell = ability.use == 'nuke' or ability.use == 'hex' or ability.use == 'snipe'
+                or ability.use == 'hex_shooters'
+            if attack_spell and ability.range > 0 then shortest = math.min(shortest or ability.range, ability.range) end
         end
+        rec.s.reach_spell = (shortest or longest) > 0 and math.max(80, shortest or longest) or nil
         return list
     end
     -- What the ability bar itself says. If that cannot be read, the tables and our own
@@ -712,8 +987,20 @@ local function new_general(manager, env)
         for key in string.gmatch(text, '[^,]+') do set[key] = true end
         return set
     end
-    local function usable(rec, ability, ready, winds)
+    -- Winds run out long before a battle does, so they are spent over time.
+    local function affordable(ability, winds)
         if ability.mana > winds then return false end
+        if ability.mana <= 0 or (env.free_winds and env.free_winds()) then return true end
+        local spent, time = 0, now()
+        for i = #spending, 1, -1 do
+            if spending[i].at + T.winds_window < time then table.remove(spending, i)
+            else spent = spent + spending[i].mana end
+        end
+        -- One big spell is always allowed: a budget must not rule out the expensive ones.
+        return spent == 0 or spent + ability.mana <= math.max(T.winds_floor, winds * T.winds_share)
+    end
+    local function usable(rec, ability, ready, winds)
+        if not affordable(ability, winds) then return false end
         if ready then return ready[ability.key] == true end
         local key = rec.id .. ability.key
         if (ready_at[key] or 0) > now() then return false end
@@ -761,14 +1048,16 @@ local function new_general(manager, env)
     local function cluster_target(rec, field, ability)
         if ability.mask == 0 then return end
         local radius = math.max(18, ability.area)
+        -- While there are several units to choose from a blast has to catch more than one.
+        local wanted = #field.standing >= 4 and 2 or 1
         local best, best_score = nil, 0
         for _, e in ipairs(field.standing) do
             if e.near > ability.danger and in_cast_range(rec, e, ability) and may_mark(e, ability.use) then
-                local score = 0
+                local score, caught = 0, 0
                 for _, other in ipairs(field.standing) do
-                    if general_dist(e, other) <= radius + 12 then score = score + other.worth end
+                    if general_dist(e, other) <= radius + 12 then score, caught = score + other.worth, caught + 1 end
                 end
-                if score > best_score then best, best_score = e, score end
+                if caught >= wanted and score > best_score then best, best_score = e, score end
             end
         end
         return best
@@ -791,7 +1080,7 @@ local function new_general(manager, env)
         end)
     end
     function choose.rally(rec, field, ability)
-        return friend_target(rec, field, ability, function(f) return f.u:is_wavering() end)
+        return friend_target(rec, field, ability, function(f) return f.wavering end)
     end
     function choose.shooters(rec, field, ability)
         return friend_target(rec, field, ability, function(f)
@@ -814,7 +1103,9 @@ local function new_general(manager, env)
         return enemy_target(rec, field, ability, function(e) return e.s.shooter end, worth_of)
     end
     function choose.hex(rec, field, ability)
-        return enemy_target(rec, field, ability, function(e) return e.fighting end, worth_of)
+        return enemy_target(rec, field, ability, function(e)
+            return e.fighting or (e.s.large and e.near < 100)
+        end, worth_of)
     end
     function choose.burst(rec, field, ability)
         local radius, count = math.max(15, ability.area), 0
@@ -824,7 +1115,10 @@ local function new_general(manager, env)
         if count >= 2 or (count == 1 and rec.fighting) then return own_target(rec, ability) end
     end
     function choose.snipe(rec, field, ability)
-        return enemy_target(rec, field, ability, function(e) return e.s.single or e.s.high end, worth_of)
+        -- Heroes and monsters first; anything else only when the winds can bear it.
+        return enemy_target(rec, field, ability, function(e)
+            return e.s.single or e.s.high or ability.mana == 0 or field.winds >= T.winds_spare
+        end, function(e) return e.worth * ((e.s.single or e.s.high) and 2 or 1) end)
     end
     function choose.nuke(rec, field, ability)
         return cluster_target(rec, field, ability)
@@ -870,6 +1164,7 @@ local function new_general(manager, env)
         marked[target.id .. ability.use] = time + math.max(T.mark_time, ability.time * 1000)
         -- Any order during the wind up could cost the spell.
         if ability.wind > 0 then locked[rec.id] = time + ability.wind * 1000 end
+        if ability.mana > 0 then spending[#spending + 1] = {at=time, mana=ability.mana} end
         counts.casts = counts.casts + 1
     end
     local function cast_abilities(field)
@@ -882,6 +1177,7 @@ local function new_general(manager, env)
                 if #list > 0 then
                     local winds = rec.u:army():winds_of_magic_current()
                     local ready = readable_ready(rec)
+                    field.winds = winds
                     local candidates = {}
                     for _, ability in ipairs(list) do
                         -- Overcasting only when the winds are plentiful.
@@ -892,6 +1188,7 @@ local function new_general(manager, env)
                     table.sort(candidates, function(a, b)
                         local ra, rb = CAST_ORDER[a.use] or 20, CAST_ORDER[b.use] or 20
                         if ra ~= rb then return ra < rb end
+                        if a.overcast ~= b.overcast and winds >= T.winds_overcast then return a.overcast end
                         return a.key < b.key
                     end)
                     for _, ability in ipairs(candidates) do
@@ -952,7 +1249,10 @@ local function new_general(manager, env)
         return 'hold'
     end
     local function set_phase(name)
-        if phase ~= name then phase, phase_at = name, now(); log('phase: ' .. name) end
+        if phase ~= name then
+            phase, phase_at, hold_gap = name, now(), 9999
+            log('phase: ' .. name)
+        end
     end
     local function update_phase(field)
         if pursuing then return set_phase('pursuit') end
@@ -968,6 +1268,15 @@ local function new_general(manager, env)
         -- Marching stops short of contact by up to one short step, so contact starts there.
         if field.fights > 0 or field.gap < T.contact + T.short_step then return set_phase('battle') end
         if phase == 'hold' then
+            -- Holding works as long as the enemy comes on or walks into our shooting.
+            local shooting = false
+            for _, rec in ipairs(field.managed) do
+                local plan = plans[rec.id]
+                shooting = shooting or (plan and plan.ranged == true and not rec.u:is_idle())
+            end
+            if shooting or field.gap < hold_gap - 10 then
+                hold_gap, phase_at = math.min(hold_gap, field.gap), now()
+            end
             local shelled = field.under_fire >= 2 and field.our_shots <= field.their_shots
             if doctrine == 'attack' or shelled or now() - phase_at >= T.hold_limit then set_phase('advance') end
         end
@@ -1007,6 +1316,7 @@ local function new_general(manager, env)
         for id in pairs(planned) do leave_planner(id) end
         if not field.ax then status = describe(field); return end
         measure(field)
+        pcall(note_threats, field)
         update_phase(field)
         command_units(field)
         cast_abilities(field)

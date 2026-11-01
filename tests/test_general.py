@@ -10,18 +10,36 @@ def flags(*names):
     return sum(FLAGS[n] for n in names)
 
 
-# key -> [flags, value, armour, ap%, vs large, vs infantry, block%]
+def row(names, value, armour, vs_large=0, vs_inf=0, block=0, attack=32, defence=32, charge=14, hp=60,
+        damage=21, ap=7, interval=4.3, splash=1, morale=60):
+    """A unit_profiles row, with the numbers of Empire swordsmen as the baseline."""
+    return [flags(*names), value, armour, vs_large, vs_inf, block, attack, defence, charge, hp,
+            damage, ap, interval, splash, morale]
+
+
 UNITS = {
-    'swords': [flags('melee', 'shield'), 500, 40, 25, 0, 0, 35],
-    'spears': [flags('melee', 'anti_large', 'shield'), 450, 40, 20, 16, 0, 30],
-    'knights': [flags('melee', 'flanker', 'shock', 'large', 'shield'), 1100, 100, 30, 0, 0, 30],
-    'archers': [flags('ranged'), 450, 15, 12, 0, 0, 0],
-    'mortar': [flags('ranged', 'arty'), 700, 15, 12, 0, 0, 0],
-    'streltsi': [flags('hybrid'), 800, 70, 70, 0, 0, 0],
-    'wizard': [flags('mage', 'high'), 700, 20, 30, 0, 0, 0],
-    'lord': [flags('melee', 'high'), 1500, 90, 50, 0, 10, 0],
-    'dragon': [flags('melee', 'high', 'large'), 2500, 120, 60, 20, 0, 0],
-    'plate': [flags('melee'), 900, 120, 25, 0, 0, 0],
+    'swords': row(['melee', 'shield', 'brace'], 500, 40, block=35),
+    'spears': row(['melee', 'anti_large', 'shield', 'brace'], 450, 40, vs_large=16, block=30, attack=26,
+                  defence=42, damage=8, ap=20, interval=5.6),
+    'knights': row(['melee', 'flanker', 'shock', 'large', 'shield'], 1100, 100, block=30, attack=34, defence=31,
+                   charge=62, hp=100, damage=28, ap=12, interval=5.1),
+    'archers': row(['ranged'], 450, 15, attack=18, defence=18, hp=50, damage=12, ap=4),
+    'guns': row(['ranged', 'direct'], 600, 20, attack=18, defence=18, hp=55, damage=12, ap=4),
+    'raiders': row(['ranged', 'harasser', 'flanker', 'large'], 500, 20, attack=20, defence=22, hp=80),
+    'mortar': row(['ranged', 'arty'], 700, 15, attack=10, defence=10, hp=50),
+    'cannon': row(['ranged', 'arty', 'direct'], 900, 15, attack=10, defence=10, hp=50),
+    'streltsi': row(['hybrid'], 800, 70, damage=9, ap=25, hp=75),
+    'wizard': row(['mage', 'high'], 700, 20, attack=20, defence=20, hp=3000, damage=30, ap=10, interval=4, splash=3),
+    'battle_mage': row(['melee', 'mage', 'high'], 1100, 50, attack=45, defence=35, hp=4000, damage=90, ap=160,
+                       interval=4, splash=4),
+    'lord': row(['melee', 'high'], 1500, 90, vs_inf=10, attack=65, defence=45, charge=65, hp=4280, damage=140,
+                ap=330, interval=4, splash=5),
+    'dragon': row(['melee', 'high', 'large'], 2500, 120, vs_large=20, attack=64, defence=50, charge=45, hp=9416,
+                  damage=145, ap=435, interval=3.8, splash=6),
+    'giant': row(['melee', 'large'], 1400, 50, attack=65, defence=30, charge=40, hp=12612, damage=200, ap=500,
+                 interval=4, splash=7),
+    'plate': row(['melee'], 900, 120, attack=46, defence=60, charge=26, hp=123, damage=34, ap=14, interval=3.8),
+    'rabble': row(['melee'], 150, 0, attack=14, defence=14, hp=40, damage=10, ap=2),
 }
 # key -> [use index, mask, range, area, mana, recharge, uses, wind up, duration, danger]
 SELF, FRIEND, ENEMY, GROUND = 1, 2, 4, 8
@@ -43,6 +61,10 @@ ABILITIES = {
     'wall': ability('nuke', GROUND, 100, 30),
     'rally_cry': ability('rally', 0, 0, 50),
     'once': ability('hex', ENEMY, 150, uses=1),
+    'storm': ability('nuke', ENEMY | GROUND, 150, 10, 13),
+    'storm_upgraded': ability('nuke', ENEMY | GROUND, 150, 10, 19),
+    'long_bolt': ability('snipe', ENEMY, 300, mana=5),
+    'hail': ability('nuke', ENEMY, 200, 0, 8, recharge=1),
     'drift': ability('nuke', ENEMY | GROUND, 200, 10, danger=80),
     'harmless': ability('nuke', ENEMY | GROUND, 200, 10, danger=0),
     'slow_cast': ability('snipe', ENEMY, 300, wind=5),
@@ -58,13 +80,15 @@ class GeneralTests(unittest.TestCase):
         self.lua = LuaRuntime(unpack_returned_tuples=True)
         self.lua.execute((ROOT / 'tests/battlefield_mock.lua').read_text(encoding='utf-8'))
         self.lua.execute((SRC / 'ingame/general.lua').read_text(encoding='utf-8')
-                         + '\nreturn nil\n'.replace('return nil', 'NEW_GENERAL = new_general; TUNE = GENERAL_TUNE'))
+                         + '\nNEW_GENERAL = new_general; TUNE = GENERAL_TUNE; EDGE = general_edge\n')
         self.g = self.lua.globals()
         self.g.DATA = self.table({'flags': FLAGS, 'uses': list(USES), 'units': UNITS, 'abilities': ABILITIES})
         self.g.env_logs = self.lua.table()
         self.general = self.lua.execute('''
             return NEW_GENERAL(bm, {data=DATA, log=function(t) env_logs[#env_logs+1]=t end,
-                report=function(t) reported=t end, free_cooldowns=function() return free_cooldowns end})
+                report=function(t) reported=t end, free_cooldowns=function() return free_cooldowns end,
+                free_winds=function() return free_winds end,
+                free_fire=function() return free_fire end})
         ''')
 
     def table(self, value):
@@ -314,7 +338,7 @@ class GeneralTests(unittest.TestCase):
         self.assertIsNone(self.general.toggle_selected())
 
     def test_switching_off_returns_what_the_commander_changed(self):
-        archers = self.shooter(behaviours={'fire_at_will': True, 'skirmish': False})
+        archers = self.shooter('guns', behaviours={'fire_at_will': True, 'skirmish': False})
         self.player('swords', 0, 90)
         self.enemy('swords', 0, 92, fighting=True)
         self.go()
@@ -429,8 +453,9 @@ class GeneralTests(unittest.TestCase):
             self.run_ticks(1)
             if knights.z > 80:
                 widest = max(widest, abs(knights.x))
-        self.assertTargets(knights, foe)
         self.assertGreater(widest, 30)    # came in from the side, not through the front
+        self.assertTrue(any(o.unit == knights.id and o.order.kind == 'attack' and o.order.target.id == foe.id
+                            for o in self.g.order_log.values()))
 
     def test_cavalry_goes_straight_in_when_the_way_around_is_blocked(self):
         knights = self.player('knights', 0, -120, class_='cav_shk', speed=9, no_path=True)
@@ -464,10 +489,308 @@ class GeneralTests(unittest.TestCase):
         self.go('attack')
         self.run_ticks(1, walk=False)
         self.assertIsNotNone(self.order(knights))
-        self.run_ticks(30)
+        self.run_ticks(14)
         self.assertTargets(knights, foe)
 
+    # Who the line goes for -----------------------------------------------------------
+    def test_a_line_fights_the_line_and_leaves_what_is_behind_it_to_the_cavalry(self):
+        ours = [self.player('swords', x, 0) for x in (0, 40, 80)]
+        front = [self.enemy('swords', x, 70) for x in (0, 40, 80)]
+        self.enemy('archers', 40, 100, reach=160, ammo=10, start_ammo=10)
+        self.enemy('lord', 0, 95, men=1, initial=1)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        self.assertEqual({self.target(u).id for u in ours}, {u.id for u in front})
+
+    def test_cavalry_is_who_goes_for_what_stands_behind_the_line(self):
+        self.player('swords', 0, 60, fighting=True)
+        self.enemy('swords', 0, 63, fighting=True)
+        knights = self.player('knights', 120, 60, class_='cav_shk', speed=9)
+        archers = self.enemy('archers', 120, 130, reach=160, ammo=10, start_ammo=10)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        self.assertTargets(knights, archers)
+
+    def test_infantry_does_not_run_after_faster_skirmishers(self):
+        unit = self.player('swords', 0, 0)
+        self.enemy('raiders', 0, 60, speed=9, reach=100, ammo=10, start_ammo=10, class_='cav_mis')
+        foe = self.enemy('swords', 40, 60)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        self.assertTargets(unit, foe)
+
+    def test_a_skirmisher_within_reach_is_fair_game(self):
+        unit = self.player('swords', 0, 0)
+        raiders = self.enemy('raiders', 0, 30, speed=9, reach=100, ammo=10, start_ammo=10, class_='cav_mis')
+        self.enemy('swords', 40, 60)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        self.assertTargets(unit, raiders)
+
+    def test_units_take_what_stands_in_front_of_them_rather_than_cross_paths(self):
+        left = self.player('swords', -60, 0)
+        right = self.player('swords', 60, 0)
+        ahead_left = self.enemy('swords', -60, 70)
+        ahead_right = self.enemy('swords', 60, 70)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        self.assertTargets(left, ahead_left)
+        self.assertTargets(right, ahead_right)
+
+    def test_with_a_choice_of_equal_distance_a_unit_takes_the_fight_it_wins(self):
+        unit = self.player('swords', 0, 0)
+        self.enemy('plate', -30, 60)
+        soft = self.enemy('rabble', 30, 60)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        self.assertTargets(unit, soft)
+
+    def test_the_numbers_behind_a_fight(self):
+        edge = self.lua.eval('''function(a_key, a_men, a_hp, e_key, e_men, e_hp)
+            local function rec(key, men, strength)
+                local row, s = DATA.units[key], {}
+                s.attack, s.defence, s.hp, s.damage, s.ap_damage, s.interval, s.splash = row[7], row[8], row[10], row[11], row[12], row[13], row[14]
+                s.armour, s.vs_large, s.vs_inf = row[3], row[4], row[5]
+                s.single, s.large, s.initial = men == 1, row[1] % 512 >= 256, men
+                return {s=s, men=men, strength=strength}
+            end
+            return EDGE(rec(a_key, a_men, a_hp), rec(e_key, e_men, e_hp))
+        end''')
+        self.assertGreater(edge('lord', 1, 1, 'swords', 100, 1), 2)
+        self.assertLess(edge('lord', 1, 1, 'giant', 1, 1), 1)
+        self.assertGreater(edge('plate', 100, 1, 'swords', 100, 1), 1.5)
+        self.assertGreater(edge('swords', 100, 1, 'swords', 100, .3), 1.5)      # a beaten unit is easy
+        self.assertEqual(round(edge('swords', 100, 1, 'swords', 100, 1), 5), 1)
+
+    def test_a_lord_does_not_pick_a_fight_it_cannot_win(self):
+        lord = self.player('lord', 0, 0, lord=True, men=1, initial=1)
+        self.player('swords', 80, 40, fighting=True)
+        self.enemy('swords', 80, 43, fighting=True)
+        giant = self.enemy('giant', 0, 60, men=1, initial=1)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        self.assertNotEqual(self.target(lord).id if self.target(lord) else None, giant.id)
+
+    def test_a_lord_goes_where_its_men_are_fighting_when_nothing_suits_it(self):
+        lord = self.player('lord', 0, 0, lord=True, men=1, initial=1)
+        self.player('swords', 80, 60, fighting=True)
+        self.enemy('giant', 80, 63, fighting=True, men=1, initial=1)
+        self.enemy('giant', 0, 40, men=1, initial=1)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        self.assertEqual(self.order(lord).kind, 'move')
+        self.assertLess(abs(self.order(lord).x - 80), 30)
+
+    def test_a_lord_takes_a_fight_it_wins(self):
+        lord = self.player('lord', 0, 0, lord=True, men=1, initial=1)
+        foe = self.enemy('swords', 0, 50)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        self.assertTargets(lord, foe)
+
+    # Charging again -------------------------------------------------------------------
+    def melee_knights(self, enemy='swords', **extra):
+        knights = self.player('knights', 0, 0, class_='cav_shk', speed=9, fighting=True, **extra)
+        foe = self.enemy(enemy, 0, 3, fighting=True)
+        self.go('attack')
+        return knights, foe
+
+    def test_shock_cavalry_rides_out_of_a_melee_and_charges_again(self):
+        knights, foe = self.melee_knights()
+        self.run_ticks(8, walk=False)
+        self.assertIsNone(self.order(knights))
+        self.run_ticks(3, walk=False)
+        order = self.order(knights)
+        self.assertEqual(order.kind, 'move')
+        self.assertTrue(order.run)
+        self.assertLess(order.z, -30)
+        knights.fighting = False
+        foe.fighting = False
+        self.run_ticks(9)
+        self.assertTargets(knights, foe)
+        self.assertTrue(self.order(knights).run)
+
+    def test_spears_make_cavalry_ride_out_sooner(self):
+        knights, _ = self.melee_knights('spears')
+        self.run_ticks(6, walk=False)
+        self.assertEqual(self.order(knights).kind, 'move')
+
+    def test_cavalry_stays_to_finish_what_is_breaking(self):
+        knights, foe = self.melee_knights()
+        foe.wavering = True
+        self.run_ticks(12, walk=False)
+        self.assertIsNone(self.order(knights))
+        foe.wavering = False
+        foe.hp = .2
+        self.run_ticks(12, walk=False)
+        self.assertIsNone(self.order(knights))
+
+    def test_blown_horses_stay_where_they_are(self):
+        knights, _ = self.melee_knights(fatigue='threshold_exhausted')
+        self.run_ticks(12, walk=False)
+        self.assertIsNone(self.order(knights))
+
+    def test_cavalry_stays_in_when_there_is_nowhere_to_ride(self):
+        knights, _ = self.melee_knights(no_path=True)
+        self.run_ticks(12, walk=False)
+        self.assertIsNone(self.order(knights))
+
+    def test_only_shock_cavalry_rides_out(self):
+        foot = self.player('swords', 0, 0, fighting=True)
+        self.enemy('swords', 0, 3, fighting=True)
+        self.go('attack')
+        self.run_ticks(15, walk=False)
+        self.assertIsNone(self.order(foot))
+
+    def test_cavalry_does_not_yo_yo(self):
+        knights, _ = self.melee_knights()
+        self.run_ticks(30, walk=False)
+        moves = [o for o in self.g.order_log.values() if o.unit == knights.id and o.order.kind == 'move']
+        self.assertLessEqual(len(moves), 2)
+
+    # Standing against a charge --------------------------------------------------------
+    def test_spears_stand_and_turn_to_face_a_charge(self):
+        spears = self.player('spears', 0, 0, facing=0)
+        self.enemy('knights', 50, 60, fast=True, speed=9, facing=220)
+        self.enemy('swords', 0, 400)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        order = self.order(spears)
+        self.assertEqual((order.kind, order.x, order.z), ('move', 0, 0))
+        self.assertAlmostEqual(order.facing, 39.8, 0)
+
+    def test_a_charge_that_never_arrives_is_given_up_on(self):
+        spears = self.player('spears', 0, 0)
+        knights = self.enemy('knights', 0, 40, fast=True, speed=5)
+        self.go('attack')
+        self.run_ticks(14, walk=False)
+        self.assertTargets(spears, knights)
+
+    def test_spears_do_not_brace_against_what_is_not_coming_for_them(self):
+        spears = self.player('spears', 0, 0)
+        knights = self.enemy('knights', 0, 40, fast=True, speed=5, facing=0)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        self.assertTargets(spears, knights)
+
+    def test_other_infantry_meets_a_charge_head_on(self):
+        swords = self.player('swords', 0, 0)
+        knights = self.enemy('knights', 0, 40, fast=True, speed=5)
+        self.go('hold')
+        self.run_ticks(1, walk=False)
+        self.assertTargets(swords, knights)
+
+    # Reacting -------------------------------------------------------------------------
+    def test_a_wavering_enemy_draws_the_attack(self):
+        unit = self.player('swords', 0, 0)
+        self.enemy('swords', -20, 60)
+        shaken = self.enemy('swords', 20, 60, wavering=True)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        self.assertTargets(unit, shaken)
+
+    def test_an_enemy_on_a_flank_draws_whoever_is_free(self):
+        free = self.player('swords', 0, 0)
+        self.enemy('swords', -30, 60)
+        raider = self.enemy('swords', 30, 62)
+        self.player('swords', 90, 60, right_threat=raider)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        self.assertTargets(free, raider)
+
+    def test_something_making_for_our_shooters_is_met_before_it_gets_there(self):
+        guard = self.player('swords', 0, 40)
+        archers = self.shooter(x=60, z=-20)
+        self.enemy('swords', -30, 100)
+        raider = self.enemy('swords', 30, 102, aimed_at=archers)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        self.assertTargets(guard, raider)
+
+    def test_threat_readings_that_fail_cost_nothing(self):
+        unit = self.player('swords', 0, 0)
+        self.enemy('swords', 0, 60)
+        self.lua.execute("function broken_threat() error('not supported') end")
+        unit.is_left_flank_threatened = self.g.broken_threat
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        self.assertIsNotNone(self.order(unit))
+
+    def army_of_eight(self):
+        line = [self.player('swords', x, 0) for x in range(-180, 181, 60)]
+        horse = self.player('knights', 0, -30, class_='cav_shk', speed=9)
+        return line, horse
+
+    def test_a_large_army_keeps_horse_and_foot_back_until_they_are_needed(self):
+        line, horse = self.army_of_eight()
+        self.enemy('swords', -60, 60)
+        self.enemy('swords', 60, 60)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        idle = [u for u in line + [horse] if not self.order(u)]
+        self.assertEqual(len(idle), 2)
+        self.assertIn(horse.id, [u.id for u in idle])
+
+    def test_a_small_army_keeps_nothing_back(self):
+        ours = [self.player('swords', x, 0) for x in (0, 40, 80)]
+        self.enemy('swords', 0, 60)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        self.assertTrue(all(self.order(u) for u in ours))
+
+    def test_the_reserve_goes_in_when_the_enemy_turns_a_flank(self):
+        line, horse = self.army_of_eight()
+        foe = self.enemy('swords', -60, 60)
+        self.enemy('swords', 60, 60)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        kept = [u for u in line if not self.order(u)][0]
+        line[0].left_threat = foe
+        self.run_ticks(1, walk=False)
+        self.assertIsNotNone(self.order(kept))
+
+    def test_the_reserve_goes_in_at_the_latest_after_a_minute(self):
+        line, _ = self.army_of_eight()
+        self.enemy('swords', -60, 60)
+        self.enemy('swords', 60, 60)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        kept = [u for u in line if not self.order(u)][0]
+        self.run_ticks(62, walk=False)
+        self.assertIsNotNone(self.order(kept))
+
+    def test_a_reserve_that_gets_attacked_fights(self):
+        line, _ = self.army_of_eight()
+        self.enemy('swords', -60, 60)
+        self.enemy('swords', 60, 60)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        kept = [u for u in line if not self.order(u)][0]
+        kept.fighting = True
+        self.run_ticks(2, walk=False)
+        kept.fighting = False
+        self.run_ticks(4, walk=False)
+        self.assertIsNotNone(self.order(kept))
+
     # Shooting -----------------------------------------------------------------------
+    def test_shooters_stay_put_while_the_enemy_nearby_is_busy_with_our_line(self):
+        archers = self.shooter(x=0, z=-25)
+        self.player('swords', 0, 0, fighting=True)
+        foe = self.enemy('swords', 0, 3, fighting=True, speed=4)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        self.assertTargets(archers, foe)
+
+    def test_a_cannon_goes_for_the_dragon_and_a_mortar_for_the_block(self):
+        cannon = self.player('cannon', 0, 0, reach=400, ammo=20, start_ammo=20, class_='art_fld')
+        mortar = self.player('mortar', 40, 0, reach=400, ammo=20, start_ammo=20, class_='art_fld')
+        dragon = self.enemy('dragon', -20, 250, men=1, initial=1)
+        block = self.enemy('swords', 60, 250)
+        self.go('hold')
+        self.run_ticks(1, walk=False)
+        self.assertTargets(cannon, dragon)
+        self.assertTargets(mortar, block)
+
     def test_archers_prefer_soft_shooters_to_shielded_armour(self):
         archers = self.shooter()
         self.enemy('plate', 0, 100)
@@ -477,7 +800,7 @@ class GeneralTests(unittest.TestCase):
         self.assertTargets(archers, soft)
         self.assertEqual(archers.melee_mode, False)
 
-    def test_nobody_shoots_into_a_melee_with_friends(self):
+    def test_a_free_target_comes_before_one_tied_up_with_friends(self):
         archers = self.shooter()
         self.player('swords', 0, 100, fighting=True)
         tied = self.enemy('swords', 0, 102, fighting=True)
@@ -487,18 +810,45 @@ class GeneralTests(unittest.TestCase):
         self.assertTargets(archers, free)
         self.assertNotEqual(self.target(archers).id, tied.id)
 
-    def test_fire_is_held_when_every_target_is_tied_up_with_friends(self):
+    def test_arcing_shots_carry_on_into_a_melee_from_behind_our_line(self):
         archers = self.shooter(behaviours={'fire_at_will': True})
+        self.player('swords', 0, 100, fighting=True)
+        tied = self.enemy('swords', 0, 102, fighting=True)
+        self.go('hold')
+        self.run_ticks(1, walk=False)
+        self.assertTargets(archers, tied)
+        self.assertTrue(archers.behaviours.fire_at_will)
+
+    def test_flat_shots_never_go_through_our_own_men(self):
+        guns = self.shooter('guns', reach=150)
+        self.player('swords', 0, 60)
+        free = self.enemy('swords', 0, 120)
+        self.go('hold')
+        self.run_ticks(1, walk=False)
+        self.assertNotEqual(self.target(guns).id if self.target(guns) else None, free.id)
+
+    def test_guns_walk_along_the_line_for_an_open_shot(self):
+        guns = self.shooter('guns', x=10, z=-10, reach=150, behaviours={'fire_at_will': True})
+        self.player('swords', 0, 60, fighting=True)
+        foe = self.enemy('swords', 0, 63, fighting=True)
+        self.go('hold')
+        self.run_ticks(1, walk=False)
+        self.assertEqual(self.order(guns).kind, 'move')
+        self.assertFalse(guns.behaviours.fire_at_will)
+        self.run_ticks(45)
+        self.assertTargets(guns, foe)
+        self.assertGreater(guns.x, 60)
+
+    def test_fire_comes_back_on_when_a_target_opens_up(self):
+        archers = self.shooter('guns', behaviours={'fire_at_will': True})
         self.player('swords', 0, 100, fighting=True)
         self.enemy('swords', 0, 102, fighting=True)
         self.go('hold')
         self.run_ticks(1, walk=False)
-        self.assertIsNone(self.order(archers))
         self.assertFalse(archers.behaviours.fire_at_will)
         self.enemy('swords', 90, 130)
-        self.run_ticks(1, walk=False)
+        self.run_ticks(3, walk=False)
         self.assertEqual(self.order(archers).kind, 'attack')
-        self.run_ticks(2, walk=False)
         self.assertTrue(archers.behaviours.fire_at_will)
 
     def test_a_dragon_in_a_melee_can_still_be_shot(self):
@@ -509,15 +859,15 @@ class GeneralTests(unittest.TestCase):
         self.run_ticks(1, walk=False)
         self.assertTargets(archers, dragon)
 
-    def test_shooters_stop_when_their_target_gets_tied_up_with_friends(self):
-        archers = self.shooter(behaviours={'fire_at_will': True})
+    def test_guns_stop_when_friends_step_into_the_line_of_fire(self):
+        archers = self.shooter('guns', behaviours={'fire_at_will': True})
         foe = self.enemy('swords', 0, 100)
         self.go('hold')
         self.run_ticks(1, walk=False)
         self.assertTargets(archers, foe)
         self.player('swords', 0, 98, fighting=True)
         foe.fighting = True
-        self.run_ticks(3, walk=False)
+        self.run_ticks(1, walk=False)
         self.assertEqual(self.order(archers).kind, 'halt')
         self.assertFalse(archers.behaviours.fire_at_will)
 
@@ -533,6 +883,91 @@ class GeneralTests(unittest.TestCase):
         self.run_ticks(3, walk=False)
         self.assertEqual(self.order(gun).kind, 'halt')
         self.assertFalse(gun.behaviours.fire_at_will)
+
+    # Friendly fire off ---------------------------------------------------------------
+    def test_with_friendly_fire_off_flat_shots_go_straight_past_our_men(self):
+        self.g.free_fire = True
+        guns = self.shooter('guns', reach=150, behaviours={'fire_at_will': True})
+        self.player('swords', 0, 60)
+        foe = self.enemy('swords', 0, 120)
+        self.go('hold')
+        self.run_ticks(1, walk=False)
+        self.assertTargets(guns, foe)
+        self.assertTrue(guns.behaviours.fire_at_will)
+
+    def test_with_friendly_fire_off_nobody_walks_for_an_angle(self):
+        self.g.free_fire = True
+        guns = self.shooter('guns', x=10, z=-10, reach=150, behaviours={'fire_at_will': True})
+        self.player('swords', 0, 60, fighting=True)
+        foe = self.enemy('swords', 0, 63, fighting=True)
+        self.go('hold')
+        self.run_ticks(5, walk=False)
+        self.assertTargets(guns, foe)
+        self.assertEqual((guns.x, guns.z), (10, -10))
+
+    def test_with_friendly_fire_off_shells_land_in_a_melee(self):
+        self.g.free_fire = True
+        gun = self.player('mortar', 0, 0, reach=300, ammo=20, start_ammo=20, class_='art_fld',
+                          behaviours={'fire_at_will': True})
+        self.player('swords', 0, 198, fighting=True)
+        foe = self.enemy('swords', 0, 200, fighting=True)
+        self.go('hold')
+        self.run_ticks(3, walk=False)
+        self.assertTargets(gun, foe)
+        self.assertTrue(gun.behaviours.fire_at_will)
+
+    def melee_or_open_target(self):
+        archers = self.shooter()
+        self.player('swords', 0, 100, fighting=True)
+        tied = self.enemy('swords', 0, 102, fighting=True)
+        free = self.enemy('swords', 60, 140)
+        self.go('hold')
+        self.run_ticks(1, walk=False)
+        return archers, tied, free
+
+    def test_friends_next_to_a_target_normally_count_against_it(self):
+        archers, _, free = self.melee_or_open_target()
+        self.assertTargets(archers, free)
+
+    def test_with_friendly_fire_off_they_do_not(self):
+        self.g.free_fire = True
+        archers, tied, _ = self.melee_or_open_target()
+        self.assertTargets(archers, tied)
+
+    def test_switching_friendly_fire_off_mid_battle_opens_fire_again(self):
+        guns = self.shooter('guns', behaviours={'fire_at_will': True})
+        self.player('swords', 0, 100, fighting=True)
+        foe = self.enemy('swords', 0, 102, fighting=True)
+        self.go('hold')
+        self.run_ticks(1, walk=False)
+        self.assertFalse(guns.behaviours.fire_at_will)
+        self.g.free_fire = True
+        self.run_ticks(3, walk=False)
+        self.assertTargets(guns, foe)
+        self.assertTrue(guns.behaviours.fire_at_will)
+
+    def test_switching_it_back_stops_shots_through_our_men(self):
+        self.g.free_fire = True
+        guns = self.shooter('guns', behaviours={'fire_at_will': True})
+        self.player('swords', 0, 100, fighting=True)
+        self.enemy('swords', 0, 102, fighting=True)
+        self.go('hold')
+        self.run_ticks(1, walk=False)
+        self.g.free_fire = False
+        self.run_ticks(1, walk=False)
+        self.assertEqual(self.order(guns).kind, 'halt')
+        self.assertFalse(guns.behaviours.fire_at_will)
+
+    def test_spells_keep_clear_of_friends_with_friendly_fire_off_too(self):
+        self.g.free_fire = True
+        wizard = self.player('wizard', 0, 0, men=1, initial=1)
+        self.give(wizard, 'drift')
+        self.player('swords', 60, 150, fighting=True)
+        self.enemy('swords', 60, 152, fighting=True)
+        self.enemy('swords', 0, 150)
+        self.go('hold')
+        self.run_ticks(1, walk=False)
+        self.assertEqual(self.cast_list(), [])
 
     def test_an_empty_gun_is_left_alone(self):
         gun = self.player('mortar', 0, 0, reach=300, ammo=0, start_ammo=20, class_='art_fld')
@@ -551,7 +986,7 @@ class GeneralTests(unittest.TestCase):
         self.assertGreater(tank.z, 100)
 
     def test_fire_at_will_does_not_flicker_as_a_target_drifts(self):
-        archers = self.shooter(behaviours={'fire_at_will': True})
+        archers = self.shooter('guns', behaviours={'fire_at_will': True})
         friend = self.player('swords', 0, 100, fighting=True)
         self.enemy('swords', 0, 102, fighting=True)
         self.go('hold')
@@ -561,7 +996,7 @@ class GeneralTests(unittest.TestCase):
         self.assertLessEqual(archers.fire_changes, 5)
 
     def test_a_unit_set_not_to_fire_at_will_stays_that_way(self):
-        archers = self.shooter(behaviours={'fire_at_will': False})
+        archers = self.shooter('guns', behaviours={'fire_at_will': False})
         friend = self.player('swords', 0, 100, fighting=True)
         self.enemy('swords', 0, 102, fighting=True)
         self.go('hold')
@@ -677,8 +1112,29 @@ class GeneralTests(unittest.TestCase):
         self.shooter(x=0, z=-20)
         self.enemy('swords', 0, 600)
         self.go()
-        self.run_ticks(50, walk=False)
+        self.run_ticks(100, walk=False)
+        self.assertEqual(self.general.phase(), 'hold')
+        self.run_ticks(60, walk=False)
         self.assertEqual(self.general.phase(), 'advance')
+
+    def test_holding_lasts_as_long_as_the_enemy_keeps_coming(self):
+        self.player('swords', 0, 0)
+        self.shooter(x=0, z=-20)
+        foe = self.enemy('swords', 0, 900)
+        self.go()
+        for _ in range(100):
+            foe.z = foe.z - 5
+            self.run_ticks(3, walk=False)
+            foe.z = foe.z - 2
+        self.assertEqual(self.general.phase(), 'hold')
+
+    def test_holding_lasts_as_long_as_our_shooters_have_something_to_do(self):
+        self.player('swords', 0, 0)
+        self.shooter(x=0, z=-20, reach=400)
+        self.enemy('swords', 0, 300)
+        self.go()
+        self.run_ticks(200, walk=False)
+        self.assertEqual(self.general.phase(), 'hold')
 
     def test_automatic_attacker_advances_at_once(self):
         self.g.attacker_side = True
@@ -695,6 +1151,48 @@ class GeneralTests(unittest.TestCase):
         self.go()
         self.run_ticks(1, walk=False)
         self.assertEqual(self.general.phase(), 'advance')
+
+    def test_a_skirmisher_out_in_front_does_not_slow_the_march(self):
+        unit = self.player('swords', 0, 0, walk=3)
+        self.enemy('raiders', 0, 120, speed=9, reach=100, ammo=10, start_ammo=10, class_='cav_mis')
+        self.enemy('swords', 0, 700)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        self.assertEqual(self.order(unit).z, 45)
+
+    def test_horsemen_out_in_front_do_not_stop_the_march_either(self):
+        unit = self.player('swords', 0, 0, walk=3)
+        self.enemy('knights', 200, 120, speed=9)
+        self.enemy('swords', 0, 700)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        self.assertEqual(self.order(unit).kind, 'move')
+        self.assertEqual(self.general.phase(), 'advance')
+
+    def test_something_about_to_hit_the_column_is_met(self):
+        unit = self.player('swords', 0, 0)
+        knights = self.enemy('knights', 0, 40, speed=5)
+        self.enemy('swords', 0, 700)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        self.assertTargets(unit, knights)
+
+    def test_stragglers_run_to_catch_up(self):
+        self.player('swords', 0, 400)
+        late = self.player('swords', 0, 0)
+        self.enemy('swords', 0, 900)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        self.assertTrue(self.order(late).run)
+        self.assertGreater(self.order(late).z, 250)
+
+    def test_stragglers_run_into_a_battle_too(self):
+        self.player('swords', 0, 400, fighting=True)
+        self.enemy('swords', 0, 403, fighting=True)
+        late = self.player('swords', 0, 0)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        self.assertTrue(self.order(late).run)
 
     def test_being_shelled_without_answer_ends_the_waiting(self):
         self.player('swords', 0, 0, shot_at=True)
@@ -810,7 +1308,7 @@ class GeneralTests(unittest.TestCase):
     def test_a_held_line_only_fights_what_comes_close(self):
         near = self.player('swords', 0, 0)
         far = self.player('swords', 400, 0)
-        foe = self.enemy('swords', 0, 50)
+        foe = self.enemy('swords', 0, 40)
         self.go('hold')
         self.run_ticks(1, walk=False)
         self.assertTargets(near, foe)
@@ -1112,6 +1610,136 @@ class GeneralTests(unittest.TestCase):
         self.assertIsNone(cast.target)
         self.assertEqual(cast.ground.x, 50)
 
+    def test_a_caster_stands_where_its_shortest_attack_spell_reaches(self):
+        wizard = self.player('wizard', 0, 0, men=1, initial=1)
+        self.give(wizard, 'long_bolt', 'storm')
+        self.player('swords', 0, 300)
+        self.enemy('swords', 0, 400)
+        self.go('attack')
+        self.run_ticks(3, walk=False)
+        self.g.orders[wizard.id] = None
+        wizard.idle = True
+        self.run_ticks(4, walk=False)
+        self.assertGreater(self.order(wizard).z, 230)
+
+    def test_a_caster_far_behind_the_line_runs_to_get_its_spells_in_before_contact(self):
+        wizard = self.player('wizard', 0, 0, men=1, initial=1)
+        self.give(wizard, 'storm')
+        self.player('swords', 0, 200, fighting=True)
+        self.enemy('swords', 0, 203, fighting=True)
+        self.go('attack')
+        self.run_ticks(2, walk=False)
+        self.g.orders[wizard.id] = None
+        wizard.idle = True
+        self.run_ticks(4, walk=False)
+        self.assertTrue(self.order(wizard).run)
+
+    def test_a_caster_that_can_fight_is_still_a_caster(self):
+        mage = self.player('battle_mage', 0, 0, men=1, initial=1)
+        self.give(mage, 'storm')
+        self.player('swords', 0, 200, fighting=True)
+        foe = self.enemy('plate', 0, 40)
+        self.enemy('swords', 0, 203, fighting=True)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        self.assertNotEqual(self.target(mage).id if self.target(mage) else None, foe.id)
+
+    def test_a_caster_that_can_fight_takes_on_what_it_clearly_beats(self):
+        mage = self.player('battle_mage', 0, 0, men=1, initial=1)
+        self.player('swords', 80, 0, fighting=True)
+        self.enemy('swords', 80, 3, fighting=True)
+        rabble = self.enemy('rabble', 0, 20)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        self.assertTargets(mage, rabble)
+
+    def test_a_hurt_caster_does_not_join_in(self):
+        mage = self.player('battle_mage', 0, 0, men=1, initial=1, hp=.5)
+        self.player('swords', 80, 0, fighting=True)
+        self.enemy('swords', 80, 3, fighting=True)
+        rabble = self.enemy('rabble', 0, 20)
+        self.go('attack')
+        self.run_ticks(1, walk=False)
+        self.assertNotEqual(self.target(mage).id if self.target(mage) else None, rabble.id)
+
+    def hail_of_spells(self, winds):
+        for i in range(4):
+            wizard = self.player('wizard', i * 10, 0, men=1, initial=1)
+            self.give(wizard, 'hail')
+            wizard.owner.current = winds
+        for x in (-60, -50, 0, 10, 60, 70):
+            self.enemy('swords', x, 150)
+        self.go('hold')
+
+    def test_winds_are_spent_over_time_not_all_at_once(self):
+        self.hail_of_spells(30)
+        self.run_ticks(5, walk=False)
+        self.assertEqual(len(self.cast_list()), 1)     # 8 of a budget of 12, a second one would overdraw
+        self.run_ticks(9, walk=False)
+        self.assertEqual(len(self.cast_list()), 2)
+
+    def test_a_full_pool_may_be_spent_faster(self):
+        self.hail_of_spells(100)
+        self.run_ticks(5, walk=False)
+        self.assertEqual(len(self.cast_list()), 5)
+
+    def test_unlimited_winds_lift_the_budget(self):
+        self.g.free_winds = True
+        self.hail_of_spells(30)
+        self.run_ticks(5, walk=False)
+        self.assertGreater(len(self.cast_list()), 4)
+
+    def test_overcasts_come_first_when_the_winds_are_plentiful(self):
+        wizard = self.player('wizard', 0, 0, men=1, initial=1)
+        self.give(wizard, 'storm', 'storm_upgraded')
+        wizard.owner.current = 60
+        self.enemy('swords', 0, 100)
+        self.go('hold')
+        self.run_ticks(1, walk=False)
+        self.assertEqual(self.cast_list()[0].key, 'storm_upgraded')
+
+    def test_the_plain_version_comes_first_otherwise(self):
+        wizard = self.player('wizard', 0, 0, men=1, initial=1)
+        self.give(wizard, 'storm', 'storm_upgraded')
+        wizard.owner.current = 25
+        self.enemy('swords', 0, 100)
+        self.go('hold')
+        self.run_ticks(1, walk=False)
+        self.assertEqual(self.cast_list()[0].key, 'storm')
+
+    def test_single_target_spells_go_on_ordinary_units_when_the_winds_can_bear_it(self):
+        wizard = self.player('wizard', 0, 0, men=1, initial=1)
+        self.give(wizard, 'bolt')
+        self.enemy('swords', 0, 200)
+        wizard.owner.current = 10
+        self.go('hold')
+        self.run_ticks(1, walk=False)
+        self.assertEqual(self.cast_list(), [])
+        wizard.owner.current = 25
+        self.run_ticks(1, walk=False)
+        self.assertEqual(len(self.cast_list()), 1)
+
+    def test_hexes_reach_out_for_big_things_coming_at_us(self):
+        wizard = self.player('wizard', 0, 0, men=1, initial=1)
+        self.give(wizard, 'curse')
+        self.player('swords', 0, 30)
+        giant = self.enemy('giant', 0, 110, men=1, initial=1)
+        self.go('hold')
+        self.run_ticks(1, walk=False)
+        self.assertEqual(self.cast_list()[0].target.id, giant.id)
+
+    def test_with_a_choice_of_targets_a_blast_has_to_catch_more_than_one(self):
+        wizard = self.player('wizard', 0, 0, men=1, initial=1)
+        self.give(wizard, 'smite')
+        for x in (-150, -60, 60, 150):
+            self.enemy('swords', x, 120)
+        self.go('hold')
+        self.run_ticks(1, walk=False)
+        self.assertEqual(self.cast_list(), [])
+        self.enemy('swords', 65, 125)
+        self.run_ticks(1, walk=False)
+        self.assertEqual(len(self.cast_list()), 1)
+
     def test_only_a_few_casts_per_second_so_the_winds_are_not_dumped(self):
         for x in range(5):
             wizard = self.player('wizard', x * 10, 0, men=1, initial=1)
@@ -1261,7 +1889,7 @@ class GeneralTests(unittest.TestCase):
         self.assertEqual(hybrid.melee_mode, False)
 
     def test_a_unit_first_seen_by_the_planner_restores_cleanly_later(self):
-        archers = self.shooter(behaviours={'fire_at_will': False})
+        archers = self.shooter('guns', behaviours={'fire_at_will': False})
         friend = self.player('swords', 0, 100, fighting=True)
         self.enemy('swords', 0, 102, fighting=True)
         self.go('native')
@@ -1274,7 +1902,7 @@ class GeneralTests(unittest.TestCase):
         self.assertIsNotNone(friend)
 
     def test_pursuit_opens_fire_again(self):
-        archers = self.shooter(behaviours={'fire_at_will': True})
+        archers = self.shooter('guns', behaviours={'fire_at_will': True})
         self.player('swords', 0, 100, fighting=True)
         foe = self.enemy('swords', 0, 102, fighting=True)
         self.go('hold')
@@ -1379,6 +2007,7 @@ class GeneralTests(unittest.TestCase):
         self.give(lord, 'aura', 'rage')
         theirs = [self.enemy('swords', x, 420) for x in (-80, -40, 0, 40, 80)]
         theirs.append(self.enemy('archers', 0, 460, reach=150, ammo=20, start_ammo=20))
+        self.g.attacker_side = True
         self.go()
         self.run_ticks(200)
         self.assertEqual(list(self.g.env_logs.values()).count('tick failed'), 0)
@@ -1440,6 +2069,12 @@ class LiveTableTests(unittest.TestCase):
         from trainer_core import GAME
         cls.units = unit_profiles(GAME)
 
+    def test_cannons_shoot_flat_and_spears_can_brace(self):
+        self.assertTrue(self.units['wh_main_emp_art_great_cannon'][0] & FLAGS['direct'])
+        self.assertFalse(self.units['wh_main_emp_art_mortar'][0] & FLAGS['direct'])
+        self.assertTrue(self.units['wh_main_emp_inf_handgunners'][0] & FLAGS['direct'])
+        self.assertTrue(self.units['wh_main_emp_inf_spearmen_0'][0] & FLAGS['brace'])
+
     def test_only_true_guns_stand_still(self):
         self.assertTrue(self.units['wh_main_emp_art_mortar'][0] & FLAGS['arty'])
         for vehicle in ('wh3_dlc23_chd_veh_magma_cannon', 'wh2_dlc13_emp_veh_steam_tank_driver_ror_0'):
@@ -1457,8 +2092,13 @@ class LiveTableTests(unittest.TestCase):
 
     def test_known_units(self):
         halberds = self.units['wh_main_emp_inf_halberdiers']
-        self.assertTrue(halberds[0] & FLAGS['anti_large'])
-        self.assertGreater(halberds[4], 0)
+        self.assertTrue(halberds[0] & FLAGS['anti_large'] and halberds[0] & FLAGS['brace'])
+        self.assertEqual(halberds[3], 16)          # bonus v large
+        self.assertEqual(halberds[6:8], [26, 42])  # attack, defence
+        self.assertEqual(halberds[10:15], [8, 20, 5.6, 1, 70])     # blow, how often, men hit, morale
+        franz = self.units['wh_main_emp_cha_karl_franz_0']
+        self.assertEqual(franz[9], 4280)
+        self.assertEqual(franz[10:14], [140, 330, 4.0, 5])
         reiksguard = self.units['wh_main_emp_cav_reiksguard']
         self.assertTrue(reiksguard[0] & FLAGS['large'] and reiksguard[0] & FLAGS['shock'])
         self.assertEqual(self.units['wh_main_dwf_inf_ironbreakers'][2], 125)

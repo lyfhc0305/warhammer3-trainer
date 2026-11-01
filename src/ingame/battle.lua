@@ -6,7 +6,7 @@ local function new_battle_trainer(manager)
     local fatigue_on, fatigue_text, fatigue_tries, fatigue_cleared = false, '', {}, {}
     local campaign_revive_rate
     local magic_ui, cooldown_ui, fatigue_ui, silence_ui
-    local general_ui, doctrine_ui, pick_ui, general_line, key_ui
+    local general_ui, doctrine_ui, pick_ui, general_line, key_ui, fire_ui
     -- The commander's hotkey is one of the game's own shortcuts: scripts never see raw
     -- keys, only shortcuts by name, on whatever key the player has them.
     local DEFAULT_HOTKEY, HOTKEY_SETTING = 'camera_bookmark_save0', 'wh3pt_general_hotkey'
@@ -18,6 +18,10 @@ local function new_battle_trainer(manager)
         camera_bookmark_save2='Shift+F11', camera_bookmark_save3='Shift+F12',
         camera_bookmark_view1='F10', camera_bookmark_view2='F11', camera_bookmark_view3='F12'}
     local hotkey, capturing, capture_token, flash_token = DEFAULT_HOTKEY, false, 0, 0
+    -- A pack that turns friendly fire off starts with shooters ignoring friends. The
+    -- player's own choice wins once made, and is kept like the hotkey.
+    local FREE_FIRE_SETTING = 'wh3pt_general_free_fire'
+    local free_fire = GENERAL_DATA.friendly_fire_off == true
     local controllers = {}
     local tracked, panel, launcher, status_ui, mode_ui = {}, nil, nil, nil, nil
     local home_x, home_y, drag_x, drag_y, watch_launcher
@@ -83,6 +87,10 @@ local function new_battle_trainer(manager)
             general_ui:SetState(general.mode() == 'off' and 'active' or 'enabled')
         end
         if doctrine_ui then doctrine_ui:SetStateText('战术：' .. GENERAL_DOCTRINES[general.doctrine()]) end
+        if fire_ui then
+            fire_ui:SetStateText('远程无视友军：' .. (free_fire and '开' or '关'))
+            fire_ui:SetState(free_fire and 'enabled' or 'active')
+        end
         if general_line then general_line:SetStateText(general.status()) end
     end
     local function update_magic_buttons()
@@ -463,6 +471,13 @@ local function new_battle_trainer(manager)
             return
         end
         if action == 'general_pick' then return toggle_selected() end
+        if action == 'general_fire' then
+            free_fire = not free_fire
+            pcall(function() core:svr_save_registry_string(FREE_FIRE_SETTING, free_fire and 'on' or 'off') end)
+            update_general_buttons()
+            report(free_fire and '远程无视友军：已开启，射手不再避开友军' or '远程无视友军：已关闭，射手恢复避开友军')
+            return
+        end
         if action == 'general_key' then
             if capturing then return stop_capture('快捷键未改') end
             return start_capture()
@@ -653,7 +668,8 @@ local function new_battle_trainer(manager)
         make(panel, 'ammo', 'button', 171, 66, 155, 26, '补满弹药')
         magic_ui = make(panel, 'magic', 'button', 10, 96, 155, 26, '')
         cooldown_ui = make(panel, 'cooldown', 'button', 171, 96, 155, 26, '')
-        silence_ui = make(panel, 'silence', 'button', 10, 126, 316, 26, '')
+        silence_ui = make(panel, 'silence', 'button', 10, 126, 155, 26, '')
+        fire_ui = make(panel, 'general_fire', 'button', 171, 126, 155, 26, '')
         general_ui = make(panel, 'general', 'button', 10, 156, 155, 26, '')
         doctrine_ui = make(panel, 'doctrine', 'button', 171, 156, 155, 26, '')
         pick_ui = make(panel, 'general_pick', 'button', 10, 186, 155, 26, '托管 / 收回选中部队')
@@ -666,6 +682,7 @@ local function new_battle_trainer(manager)
         magic_ui:SetTooltipText('继承战役设置，可在本场独立切换；每0.1秒补充玩家军队魔法池至至少30、储备至至少100。关闭后停止补充。', true)
         cooldown_ui:SetTooltipText('继承战役设置，可在本场独立切换；每0.5秒重置玩家部队全部主动技能与法术的冷却和使用次数。仍需施法动作和有效目标，法术仍消耗魔法。', true)
         silence_ui:SetTooltipText('继承战役设置，可在本场独立切换；只作用于敌方。每秒禁用敌方单位的法术、主动技能和会触发召唤的被动，召唤出的部队到场即清除。军队技能无法禁用，炮击和增益类军队技能仍可能释放。关闭后恢复敌方技能。', true)
+        fire_ui:SetTooltipText('AI 将军的射手和炮兵要不要避开友军。开：直接开火，不绕开友军，不找角度，友军身边的敌人照打。关：直射要有清晰火线，炮弹不落在友军身边。法术不受影响，设置长期保存。装了「关闭友军伤害」或「旧版全局弹道 / 爆炸覆盖」时默认开；后者只覆盖老内容，DLC23 之后的单位仍会误伤。', true)
         general_ui:SetTooltipText('点击在 关 / 全军 / 除主将外 / 仅援军 之间切换。部队仍在你手里：随时可以下令，你下的命令优先，15 秒内 AI 不再插手这支部队。', true)
         doctrine_ui:SetTooltipText('自动：按敌我强弱决定固守或推进。进攻：立刻列阵推进。固守：只打靠近的敌人。原生 AI：交给游戏自带 AI，部队卡牌变灰；城墙攻防战默认用它。', true)
         pick_ui:SetTooltipText('单独交出或收回选中的部队，不受上面的模式限制，和快捷键效果相同。卡牌右上角绿点表示 AI 指挥中，黄点表示你刚接管。', true)
@@ -683,6 +700,8 @@ local function new_battle_trainer(manager)
         started = true
         local loaded, saved_key = pcall(function() return core:svr_load_registry_string(HOTKEY_SETTING) end)
         if loaded and type(saved_key) == 'string' and saved_key ~= '' then hotkey = saved_key end
+        local read, saved_fire = pcall(function() return core:svr_load_registry_string(FREE_FIRE_SETTING) end)
+        if read and (saved_fire == 'on' or saved_fire == 'off') then free_fire = saved_fire == 'on' end
         guard(function()
             if not pending then return end
             local owner = core:svr_load_string('wh3pt_magic_owner')
@@ -711,7 +730,7 @@ local function new_battle_trainer(manager)
                 or c.string == 'wh3pt_battle_magic' or c.string == 'wh3pt_battle_cooldown'
                 or c.string == 'wh3pt_battle_silence' or c.string == 'wh3pt_battle_general'
                 or c.string == 'wh3pt_battle_doctrine' or c.string == 'wh3pt_battle_general_pick'
-                or c.string == 'wh3pt_battle_general_key'
+                or c.string == 'wh3pt_battle_general_key' or c.string == 'wh3pt_battle_general_fire'
         end, function(c) guard(function()
             if c.string == 'wh3pt_battle_open' then
                 if not drop_launcher() then toggle_panel() end
@@ -765,8 +784,11 @@ local function new_battle_trainer(manager)
     function api.fatigue_state() return fatigue_on, fatigue_text end
     function api.silence_state() return silence_on, silence_blocked, silence_removed end
     function api.hotkey() return hotkey, capturing end
+    function api.free_fire() return free_fire end
     general = new_general(manager, {data=GENERAL_DATA, log=log, report=report,
         free_cooldowns=function() return cooldown_on end,
+        free_winds=function() return magic_on end,
+        free_fire=function() return free_fire end,
         walled=function()
             return manager:is_siege_battle() and not string.find(tostring(manager:battle_type()), 'unfortified')
         end})

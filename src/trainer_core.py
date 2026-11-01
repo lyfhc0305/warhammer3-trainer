@@ -14,7 +14,7 @@ from attributes import ATTRIBUTES, NEGATIVE, SCOPE_CORRECTIONS, templates, valid
 from shop_addon import SHOP_FILENAME, safe_shop_entries
 from ballistic_addon import BALLISTIC_FILENAME, safe_ballistic_entries
 
-VERSION = '2.13.1'
+VERSION = '2.15.0'
 GAME = r'D:\Program Files (x86)\Steam\steamapps\common\Total War WARHAMMER III'
 PACK_NAME = 'zz_wh3_personal_trainer.pack'
 CAP_VALUE_RANGE = (0, 100000000)  # healing_percentage_cap, as a multiple of unit health

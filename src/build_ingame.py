@@ -11,7 +11,8 @@ import zlib
 from attributes import ATTRIBUTES, NEGATIVE, SCOPE_CORRECTIONS, templates, validate_value
 from trainer_core import GAME, Options, EFFECTS, OUTPUT, REFERENCE, VERSION, build, sha, atomic_write, PACK_NAME
 from database import encode, decode, table_version
-from game_compat import MANIFEST, addon_record, game_version, make_manifest
+from friendly_fire_addon import friendly_fire_entries
+from game_compat import MANIFEST, addon_record, game_version, make_manifest, manifest_addons
 from general_data import FLAGS as GENERAL_FLAGS, USES as GENERAL_USES, general_data
 from pack_io import read_pack, write_pack
 from shop_addon import SHOP_FILENAME
@@ -434,7 +435,11 @@ def general_tables(game):
         return {'flags': GENERAL_FLAGS, 'uses': list(GENERAL_USES), 'units': {}, 'abilities': {}}
 
 
-def ui_files(catalog, strategic=None, game=GAME):
+# Modules that stop shots hurting friends: the commander's shooters start out relying on that.
+FRIENDLY_FIRE_ADDONS = {'ballistic', 'friendly_fire'}
+
+
+def ui_files(catalog, strategic=None, game=GAME, friendly_fire_off=False):
     """Everything in the pack that defines the look of the panel."""
     files = {'script\\campaign\\mod\\wh3pt_panel.lua': (
         'local CATALOG = ' + lua(catalog) + '; local STRATEGIC = '
@@ -452,7 +457,7 @@ def ui_files(catalog, strategic=None, game=GAME):
     ).encode('utf-8')}
     files['script\\battle\\mod\\wh3pt_battle.lua'] = (
         'local ENEMY_SUMMONS = ' + lua(enemy_summons(game)) + '\n'
-        + 'local GENERAL_DATA = ' + lua(general_tables(game)) + '\n'
+        + 'local GENERAL_DATA = ' + lua(dict(general_tables(game), friendly_fire_off=friendly_fire_off)) + '\n'
         + (ROOT / 'ingame/general.lua').read_text(encoding='utf-8') + '\n'
         + (ROOT / 'ingame/battle.lua').read_text(encoding='utf-8')
     ).encode('utf-8')
@@ -657,13 +662,16 @@ def build_ingame(game=GAME, addons=None, local_dir=None, workshop=None):
                 table_version(game, 'campaign_difficulty_handicap_effects_tables'), edited
             )
             enabled_addons.append('agent_ai')
+        if addons.get('friendly_fire'):
+            files.update(friendly_fire_entries(game, files))
+            enabled_addons.append('friendly_fire')
 
     from strategic_data import SOURCE_TABLES as STRATEGIC_TABLES, strategic_catalog, native_recruitment_files
     strategic = strategic_catalog(game)
     from income_data import SOURCE_TABLES as INCOME_TABLES, native_income_files
     files.update(native_income_files(game, strategic))
     files.update(native_recruitment_files(game, strategic))
-    files.update(ui_files(catalog, strategic, game))
+    files.update(ui_files(catalog, strategic, game, bool(FRIENDLY_FIRE_ADDONS & set(enabled_addons))))
     files['wh3_personal_trainer_marker.txt'] = b'WH3-PERSONAL-TRAINER-v1'
     files['wh3pt_mode.txt'] = b'ingame-v2'
     shipped = {n.split('\\')[1] for n in files if n.startswith('db\\')}
@@ -688,7 +696,8 @@ def rebuild_ui_only(pack_path):
     catalog_line = current[:current.index('\n')]
     for name in [n for n in files if n.startswith('ui\\wh3pt\\')]:
         del files[name]
-    files.update(ui_files([]))
+    addons = manifest_addons(json.loads(files[MANIFEST])) if MANIFEST in files else None
+    files.update(ui_files([], friendly_fire_off=bool(FRIENDLY_FIRE_ADDONS & set((addons or {}).get('enabled', [])))))
     fresh = files['script\\campaign\\mod\\wh3pt_panel.lua'].decode('utf-8')
     files['script\\campaign\\mod\\wh3pt_panel.lua'] = (catalog_line + fresh[fresh.index('\n'):]).encode('utf-8')
     return write_pack(files)

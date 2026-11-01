@@ -35,7 +35,8 @@ function make_unit(side, key, x, z, extra)
         initial=100, ammo=0, start_ammo=0, reach=0, speed=5, walk=3, flying=false, flies=false, routing=false,
         fighting=false, idle=true, visible=true, valid=true, deployed=true, controllable=true, rampaging=false,
         leaving=false, shot_at=false, wavering=false, class='inf_mel', attributes={}, behaviours={}, abilities={},
-        lord=false, player=side == 'player', width=40, value=500, script_held=false, locked=false}
+        lord=false, player=side == 'player', width=40, value=500, script_held=false, locked=false,
+        fast=false, shattered=false, fatigue='threshold_fresh'}
     for k, value in pairs(extra or {}) do u[k] = value end
     function u:unique_ui_id() return self.id end
     function u:type() return self.key end
@@ -59,6 +60,16 @@ function make_unit(side, key, x, z, extra)
     function u:is_rampaging() return self.rampaging end
     function u:is_idle() return self.idle end
     function u:is_wavering() return self.wavering end
+    function u:is_shattered() return self.shattered end
+    function u:is_moving_fast() return self.fast end
+    function u:fatigue_state() return self.fatigue end
+    function u:is_left_flank_threatened() return self.left_threat ~= nil end
+    function u:is_right_flank_threatened() return self.right_threat ~= nil end
+    function u:is_rear_flank_threatened() return self.rear_unit ~= nil end
+    function u:left_flank_threat() return self.left_threat end
+    function u:right_flank_threat() return self.right_threat end
+    function u:rear_threat() return self.rear_unit end
+    function u:current_target() return self.aimed_at end
     function u:is_commanding_unit() return self.lord end
     function u:is_artillery() return self.class == 'art_fld' or self.class == 'art_fix' end
     function u:is_fixed_artillery() return self.class == 'art_fix' end

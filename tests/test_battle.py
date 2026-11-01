@@ -938,6 +938,9 @@ class GeneralPanelTests(BattleCase):
                 function u:is_in_melee() return false end
                 function u:is_currently_flying() return false end
                 function u:is_under_missile_attack() return false end
+                function u:is_wavering() return false end
+                function u:is_shattered() return false end
+                function u:is_moving_fast() return false end
                 function u:is_leaving_battle() return false end
                 function u:is_valid_target() return true end
                 function u:is_visible_to_alliance() return true end
@@ -977,6 +980,7 @@ class GeneralPanelTests(BattleCase):
             function player_army:create_unit_controller()
                 local uc=create(self)
                 function uc:attack_unit(target,primary,run) attacks[#attacks+1]={unit=self.unit,target=target} end
+                function uc:melee() end
                 return uc
             end
             common={selected={}}
@@ -1028,7 +1032,8 @@ class GeneralPanelTests(BattleCase):
     def test_all_new_rows_fit_inside_the_panel(self):
         self.open_panel()
         panel = self.g.widgets.wh3pt_battle_panel
-        for name in ('general', 'doctrine', 'general_pick', 'general_key', 'general_line', 'status'):
+        for name in ('silence', 'general_fire', 'general', 'doctrine', 'general_pick', 'general_key',
+                     'general_line', 'status'):
             widget = self.g.widgets['wh3pt_battle_' + name]
             self.assertLessEqual(widget.y + widget.h, panel.y + panel.h, name)
             self.assertLessEqual(widget.x + widget.w, panel.x + panel.w, name)
@@ -1072,6 +1077,72 @@ class GeneralPanelTests(BattleCase):
         self.g.commands.Move()
         self.assertTrue(self.api.general.paused(self.g.own.id))
         self.assertFalse(self.api.general.paused(self.g.ordinary.id))
+
+    def test_the_free_fire_button_switches_says_so_and_is_kept(self):
+        self.open_panel()
+        button = self.g.widgets.wh3pt_battle_general_fire
+        self.assertEqual((button.text, button.state), ('远程无视友军：关', 'active'))
+        self.click('general_fire')
+        self.assertEqual((button.text, button.state), ('远程无视友军：开', 'enabled'))
+        self.assertTrue(self.api.free_fire())
+        self.assertEqual(self.g.registry.wh3pt_general_free_fire, 'on')
+        self.assertIn('不再避开友军', self.api.status()[0])
+        self.click('general_fire')
+        self.assertEqual((button.text, button.state), ('远程无视友军：关', 'active'))
+        self.assertEqual(self.g.registry.wh3pt_general_free_fire, 'off')
+
+    def next_battle(self):
+        runtime = self.module.new(self.g.bm)
+        runtime.start()
+        return runtime
+
+    def test_a_pack_without_friendly_fire_off_starts_with_shooters_careful(self):
+        self.assertFalse(self.next_battle().free_fire())
+
+    def test_a_pack_with_friendly_fire_off_starts_with_shooters_free(self):
+        self.g.GENERAL_DATA.friendly_fire_off = True
+        self.assertTrue(self.next_battle().free_fire())
+
+    def test_the_players_choice_beats_what_the_pack_says(self):
+        self.g.GENERAL_DATA.friendly_fire_off = True
+        self.g.registry.wh3pt_general_free_fire = 'off'
+        self.assertFalse(self.next_battle().free_fire())
+        self.g.GENERAL_DATA.friendly_fire_off = False
+        self.g.registry.wh3pt_general_free_fire = 'on'
+        self.assertTrue(self.next_battle().free_fire())
+
+    def test_a_registry_that_fails_costs_the_setting_and_nothing_else(self):
+        self.lua.execute('''
+            function core:svr_load_registry_string() error('no registry') end
+            function core:svr_save_registry_string() error('no registry') end
+        ''')
+        self.open_panel()
+        self.click('general_fire')
+        self.assertTrue(self.api.free_fire())
+        self.assertEqual(self.g.widgets.wh3pt_battle_general_fire.text, '远程无视友军：开')
+
+    def test_the_commander_hears_the_free_fire_button(self):
+        self.battlefield()
+        self.lua.execute('''
+            dress(own,0,45)
+            function ordinary:is_artillery() return true end
+            function ordinary:missile_range() return 200 end
+            function ordinary:ammo_left() return 10 end
+            function ordinary:unit_in_range() return true end
+        ''')
+        self.open_panel()
+        self.click('general')
+        self.click('doctrine')
+        self.click('doctrine')      # 固守: nobody moves, so only the gun's decision shows
+        shots = lambda: [a for a in self.g.attacks.values() if a.unit.id == self.g.ordinary.id]
+        self.g.battle_clock = 1000
+        self.g.timers.wh3pt_battle_general()
+        self.assertEqual(shots(), [])
+        self.click('general_fire')
+        self.g.battle_clock = 2000
+        self.g.timers.wh3pt_battle_general()
+        self.assertEqual(len(shots()), 1)
+        self.assertEqual(shots()[0].target.id, self.g.enemy.id)
 
     def test_picking_nothing_asks_for_a_selection(self):
         self.battlefield()

@@ -1938,14 +1938,14 @@ class InGameTests(unittest.TestCase):
     def test_optional_addons_bundle_cleanly(self):
         payload,report=build_ingame(addons={
             'building':True,'cap':True,'cap_value':888,
-            'shop':True,'ballistic':True,'agent_ai':True,'agent_ai_value':50,
+            'shop':True,'ballistic':True,'agent_ai':True,'agent_ai_value':50,'friendly_fire':True,
         })
-        self.assertEqual(set(report['addons']),{'building','cap','shop','ballistic','agent_ai'})
+        self.assertEqual(set(report['addons']),{'building','cap','shop','ballistic','agent_ai','friendly_fire'})
         with tempfile.TemporaryDirectory() as tmp:
             p=Path(tmp)/'addons.pack'; p.write_bytes(payload)
             files=read_pack(p)
             self.assertEqual(manifest_addons(read_manifest(p)),{
-                'enabled':['building','cap','agent_ai','shop','ballistic'],
+                'enabled':['building','cap','agent_ai','shop','ballistic','friendly_fire'],
                 'values':{'cap_value':888.0,'agent_ai_value':50.0}})
             self.assertEqual(report['addon_values'],{'cap_value':888.0,'agent_ai_value':50.0})
             self.assertTrue(any('_kv_unit_ability_scaling_rules_tables' in k for k in files))
