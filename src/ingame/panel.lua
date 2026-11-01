@@ -65,6 +65,7 @@ local PAGES = {
         {'恢复', 'healing', 'revive', 'ammo'},
         {'魔法', 'battle_magic', 'battle_cooldown'},
         {'敌方', 'battle_silence'},
+        {'指挥', 'battle_general'},
         {'特性', 'vigour', 'unbreakable', 'vanguard', 'chainsword'},
         {'进攻', 'attack', 'weapon', 'missile_damage', 'range', 'reload', 'ammunition'},
         {'防御', 'defence', 'armour', 'ward', 'missile_resistance', 'health'},

@@ -101,7 +101,7 @@ local function widget(id,parent,template)
     function w:IsDragged() return self.dragged==true end
     function w:SetProperty(name,value) self.properties=self.properties or {}; self.properties[name]=value end
     function w:Destroy() self.dead=true; for _,c in ipairs(self.children) do if not c.dead then c:Destroy() end end end
-    function w:SetDockingPoint(n) assert(n==0) end
+    function w:SetDockingPoint(n) assert(n==0 or n==3); self.dock=n end
     function w:SetDockOffset(dx,dy) self.dock_dx=dx; self.dock_dy=dy end
     function w:SetCanResizeWidth(v) assert(v==true) end
     function w:SetCanResizeHeight(v) assert(v==true) end
@@ -233,6 +233,9 @@ function core:svr_save_bool(key,value) assert(type(value)=='boolean');svr[key]=v
 function core:svr_load_bool(key) return svr[key]==true end
 function core:svr_save_string(key,value) assert(type(value)=='string');svr[key]=value end
 function core:svr_load_string(key) return svr[key] or '' end
+registry={}
+function core:svr_save_registry_string(key,value) assert(type(value)=='string');registry[key]=value end
+function core:svr_load_registry_string(key) return registry[key] or '' end
 function core:get_ui_root() return root end
 -- Optional native call; tests may set core.get_screen_resolution=nil.
 function core:get_screen_resolution() return screen_width, screen_height end

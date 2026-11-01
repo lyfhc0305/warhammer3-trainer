@@ -14,7 +14,7 @@ from attributes import ATTRIBUTES, NEGATIVE, SCOPE_CORRECTIONS, templates, valid
 from shop_addon import SHOP_FILENAME, safe_shop_entries
 from ballistic_addon import BALLISTIC_FILENAME, safe_ballistic_entries
 
-VERSION = '2.12.0'
+VERSION = '2.13.1'
 GAME = r'D:\Program Files (x86)\Steam\steamapps\common\Total War WARHAMMER III'
 PACK_NAME = 'zz_wh3_personal_trainer.pack'
 CAP_VALUE_RANGE = (0, 100000000)  # healing_percentage_cap, as a multiple of unit health
@@ -28,7 +28,6 @@ BUNDLE = (ROOT if FROZEN else HOME) / 'output/ingame' / PACK_NAME
 MODS = {
     'building': ('2789869874', 'cpecific_building_quick_upgrade.pack'),
     'cap': ('2789900649', 'no regen cap.pack'),
-    'ai': ('2799316652', 'aigeneral_iii_pancake.pack'),
     'blood': ('2935493705', '@!!!blood_returning+12.5.pack'),
 }
 EFFECTS = {
@@ -142,7 +141,6 @@ def separate_repeating_ammo(files, ability_key, ammo_key, interval, unique_id):
 @dataclass
 class Options:
     building: bool = False
-    ai: bool = False
     cap: bool = False
     cap_value: float = 50.0
     regeneration: bool = False
@@ -217,9 +215,8 @@ def build(game, options, workshop=None, local_dir=None):
             loaded[key] = read_pack(found[key])
             sources.append({'path': str(found[key]), 'sha256': sha(data)})
         return loaded[key]
-    for key in ('building', 'ai'):
-        if getattr(options, key):
-            files.update({n: b for n, b in source(key).items() if not n.endswith('.rpfm_reserved')})
+    if options.building:
+        files.update({n: b for n, b in source('building').items() if not n.endswith('.rpfm_reserved')})
     ability = options.regeneration or options.resurrection or options.ammunition or options.reload
     if ability or any(getattr(options, key) for key in EFFECTS):
         for name, data in source('blood').items():

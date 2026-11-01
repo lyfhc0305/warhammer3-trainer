@@ -12,6 +12,7 @@ from attributes import ATTRIBUTES, NEGATIVE, SCOPE_CORRECTIONS, templates, valid
 from trainer_core import GAME, Options, EFFECTS, OUTPUT, REFERENCE, VERSION, build, sha, atomic_write, PACK_NAME
 from database import encode, decode, table_version
 from game_compat import MANIFEST, addon_record, game_version, make_manifest
+from general_data import FLAGS as GENERAL_FLAGS, USES as GENERAL_USES, general_data
 from pack_io import read_pack, write_pack
 from shop_addon import SHOP_FILENAME
 from ballistic_addon import BALLISTIC_FILENAME
@@ -425,6 +426,14 @@ def enemy_summons(game):
                 units={r['spawned_unit']: True for r in summons})
 
 
+def general_tables(game):
+    """A table the build cannot read costs the commander precision, never the Pack."""
+    try:
+        return general_data(game)
+    except Exception:
+        return {'flags': GENERAL_FLAGS, 'uses': list(GENERAL_USES), 'units': {}, 'abilities': {}}
+
+
 def ui_files(catalog, strategic=None, game=GAME):
     """Everything in the pack that defines the look of the panel."""
     files = {'script\\campaign\\mod\\wh3pt_panel.lua': (
@@ -443,7 +452,10 @@ def ui_files(catalog, strategic=None, game=GAME):
     ).encode('utf-8')}
     files['script\\battle\\mod\\wh3pt_battle.lua'] = (
         'local ENEMY_SUMMONS = ' + lua(enemy_summons(game)) + '\n'
-    ).encode('utf-8') + (ROOT / 'ingame/battle.lua').read_bytes()
+        + 'local GENERAL_DATA = ' + lua(general_tables(game)) + '\n'
+        + (ROOT / 'ingame/general.lua').read_text(encoding='utf-8') + '\n'
+        + (ROOT / 'ingame/battle.lua').read_text(encoding='utf-8')
+    ).encode('utf-8')
     for name, make in UI_IMAGES.items():
         files['ui\\wh3pt\\' + name + '.png'] = make()
     for kind in ['button', 'label', 'card']:
@@ -582,6 +594,9 @@ def build_ingame(game=GAME, addons=None, local_dir=None, workshop=None):
         dict(id='battle_silence', label='禁止敌方技能与召唤', group='特殊', min=1, max=1,
              default=1, step=1, toggle=True, unit='', manual_battle=True, battle_setting='silence',
              hint='开战自动启用；只作用于敌方，玩家与盟军不受影响'),
+        dict(id='battle_general', label='AI 将军托管', group='特殊', min=1, max=1,
+             default=1, step=1, toggle=True, unit='', manual_battle=True, battle_setting='general',
+             hint='开战自动托管全军；战斗面板可改，部队仍可手动指挥'),
     ])
     bundles = [
         dict(
@@ -610,14 +625,13 @@ def build_ingame(game=GAME, addons=None, local_dir=None, workshop=None):
         if addons.get('ballistic'):
             local_mods.append(BALLISTIC_FILENAME)
             enabled_addons.append('ballistic')
-        has_builder_addons = any(addons.get(k) for k in ('building', 'ai', 'cap')) or bool(local_mods)
+        has_builder_addons = any(addons.get(k) for k in ('building', 'cap')) or bool(local_mods)
         if has_builder_addons:
-            for k in ('building', 'ai', 'cap'):
+            for k in ('building', 'cap'):
                 if addons.get(k):
                     enabled_addons.append(k)
             addon_opts = Options(
                 building=bool(addons.get('building')),
-                ai=bool(addons.get('ai')),
                 cap=bool(addons.get('cap')),
                 cap_value=float(addons.get('cap_value', Options.cap_value)),
                 local_mods=local_mods,

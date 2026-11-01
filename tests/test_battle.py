@@ -7,12 +7,13 @@ from trainer_core import GAME
 from tests import ROOT, SRC, REFERENCE
 
 
-class BattleTests(unittest.TestCase):
+class BattleCase(unittest.TestCase):
     def setUp(self):
         self.lua = LuaRuntime(unpack_returned_tuples=True)
         self.lua.execute((ROOT / 'tests/runtime_mock.lua').read_text(encoding='utf-8'))
         self.lua.execute('''
             ENEMY_SUMMONS={passives={summon_on_death=true},units={skeletons_summoned=true,feral_cold_ones=true}}
+            GENERAL_DATA={flags={},uses={},units={},abilities={}}
             function collection(items)
                 return {count=function() return #items end, item=function(_,i) return items[i] end}
             end
@@ -115,6 +116,12 @@ class BattleTests(unittest.TestCase):
             function bm:is_multiplayer() return multiplayer end
             function bm:is_replay() return replay==true end
             function bm:is_conflict_phase() return conflict~=false end
+            function bm:is_any_cutscene_running() return false end
+            function bm:is_siege_battle() return siege==true end
+            function bm:battle_type() return battle_type or 'land_normal' end
+            function bm:time_elapsed_ms() return battle_clock or 0 end
+            commands={}
+            function bm:register_command_handler_callback(name,fn,key) assert(key);commands[name]=fn end
             function bm:get_player_alliance()
                 return {armies=function() return collection(battle_armies) end}
             end
@@ -128,7 +135,8 @@ class BattleTests(unittest.TestCase):
             function bm:register_phase_change_callback(name,fn) phases[name]=fn end
             function flush_battle() local q=callbacks; callbacks={}; for _,fn in ipairs(q) do fn() end end
         ''')
-        module = self.lua.execute((SRC / 'ingame/battle.lua').read_text(encoding='utf-8'))
+        module = self.lua.execute((SRC / 'ingame/general.lua').read_text(encoding='utf-8') + '\n'
+                                  + (SRC / 'ingame/battle.lua').read_text(encoding='utf-8'))
         self.g = self.lua.globals()
         self.module = module
         self.api = module.new(self.g.bm)
@@ -157,6 +165,8 @@ class BattleTests(unittest.TestCase):
             return u
         ''' % code)
 
+
+class BattleTests(BattleCase):
     def test_silence_comes_from_the_campaign_and_only_for_the_owner(self):
         self.publish_silence()
         self.api.start()
@@ -327,7 +337,7 @@ class BattleTests(unittest.TestCase):
         self.assertEqual(self.g.own.men, 55)
         self.lua.execute("core:trigger_event('LoadingScreenDismissed', {}); core:trigger_event('ScriptEventAllModsLoaded', true)")
         self.assertEqual(sum('Started: revival timer' in line for line in self.g.logs.values()),1)
-        self.assertEqual(len(list(self.g.timers.keys())),4)  # ui, revival, magic, dock
+        self.assertEqual(len(list(self.g.timers.keys())),5)  # ui, revival, magic, general, dock
 
     def test_all_battle_panel_actions_after_native_boot_event(self):
         self.publish_campaign_magic()
@@ -745,8 +755,8 @@ class BattleTests(unittest.TestCase):
             runtime.ui()
             panel=self.g.widgets.wh3pt_battle_panel
             self.assertEqual(self.g.widgets.wh3pt_battle_open.w,int(112*scale))
-            self.assertEqual((panel.w,panel.h),(int(336*scale),int(174*scale)))
-            self.assertLess(panel.h/height,0.17)
+            self.assertEqual((panel.w,panel.h),(int(336*scale),int(262*scale)))
+            self.assertLess(panel.h/height,0.25)
             self.assertTrue(self.g.widgets.wh3pt_battle_probe.dead)
 
     def test_battle_panel_scale_falls_back_without_text_measurement(self):
@@ -912,6 +922,438 @@ class BattleTests(unittest.TestCase):
         launcher.MoveTo(launcher,700,300)
         self.click('open');self.click('open')
         self.assertEqual((status.x-panel.x,status.y-panel.y),offset)
+
+
+class GeneralPanelTests(BattleCase):
+    """The commander as the player meets it. It has its own tests in test_general.py."""
+
+    def battlefield(self):
+        self.lua.execute('''
+            function vec(x,z) return {get_x=function() return x end,get_y=function() return 0 end,get_z=function() return z end} end
+            function dress(u,x,z,side)
+                u.flags=0
+                function u:position() return vec(x,z) end
+                function u:bearing() return 0 end
+                function u:is_routing() return false end
+                function u:is_in_melee() return false end
+                function u:is_currently_flying() return false end
+                function u:is_under_missile_attack() return false end
+                function u:is_leaving_battle() return false end
+                function u:is_valid_target() return true end
+                function u:is_visible_to_alliance() return true end
+                function u:is_controllable() return true end
+                function u:is_rampaging() return false end
+                function u:is_idle() return true end
+                function u:is_commanding_unit() return false end
+                function u:is_artillery() return false end
+                function u:is_fixed_artillery() return false end
+                function u:is_cavalry() return false end
+                function u:is_chariot() return false end
+                function u:is_war_machine() return false end
+                function u:is_war_beasts() return false end
+                function u:is_anti_cavalry_infantry() return false end
+                function u:is_pikemen() return false end
+                function u:can_use_magic() return false end
+                function u:unit_class() return 'inf_mel' end
+                function u:strategic_value() return 500 end
+                function u:fast_speed() return 5 end
+                function u:slow_speed() return 3 end
+                function u:missile_range() return 0 end
+                function u:has_attribute() return false end
+                function u:can_use_behaviour() return false end
+                function u:can_fly() return false end
+                function u:ordered_width() return 40 end
+                function u:starting_ammo() return 0 end
+            end
+            dress(own,0,0); dress(ordinary,40,0); dress(ally,80,0); dress(enemy,0,50)
+            function bm:get_player_alliance()
+                return {armies=function() return collection(battle_armies) end,
+                    is_attacker=function() return false end}
+            end
+            function v(x,y,z) return vec(x,z) end
+            function v_to_ground(p) return p end
+            attacks={}
+            local create=player_army.create_unit_controller
+            function player_army:create_unit_controller()
+                local uc=create(self)
+                function uc:attack_unit(target,primary,run) attacks[#attacks+1]={unit=self.unit,target=target} end
+                return uc
+            end
+            common={selected={}}
+            function common.get_context_value(kind,id,expression)
+                if expression=='IsSelected' then return common.selected[tonumber(id)]==true end
+                local key=string.match(expression,'^ShortcutKey%("(.*)"%)$')
+                if key then return bound_keys and bound_keys[key] or '' end
+            end
+            function common.get_localised_string(key) return shortcut_names and shortcut_names[key] or '' end
+            camera={moves={}}
+            function camera:position() return 'camera_pos' end
+            function camera:target() return 'camera_target' end
+            function camera:move_to(position,target,time,linear,fov,queue)
+                self.moves[#self.moves+1]={position=position,target=target,time=time,fov=fov,queue=queue}
+            end
+            function bm:camera() return camera end
+        ''')
+
+    def open_panel(self):
+        self.api.start()
+        self.g.timers['wh3pt_battle_ui']()
+
+    def click(self, name):
+        self.g.core.trigger_event(self.g.core, 'ComponentLClickUp', self.lua.table(string='wh3pt_battle_' + name))
+
+    def test_the_mode_button_cycles_and_says_so(self):
+        self.open_panel()
+        button = self.g.widgets.wh3pt_battle_general
+        self.assertEqual(button.text, 'AI 将军：关')
+        self.click('general')
+        self.assertEqual(button.text, 'AI 将军：全军')
+        self.assertEqual(button.state, 'enabled')
+        self.click('general')
+        self.assertEqual(button.text, 'AI 将军：除主将外')
+        self.click('general')
+        self.assertEqual(button.text, 'AI 将军：仅援军')
+        self.click('general')
+        self.assertEqual(button.text, 'AI 将军：关')
+        self.assertEqual(button.state, 'active')
+
+    def test_the_doctrine_button_cycles_and_says_so(self):
+        self.open_panel()
+        button = self.g.widgets.wh3pt_battle_doctrine
+        self.assertEqual(button.text, '战术：自动')
+        for text in ('战术：进攻', '战术：固守', '战术：原生 AI', '战术：自动'):
+            self.click('doctrine')
+            self.assertEqual(button.text, text)
+
+    def test_all_new_rows_fit_inside_the_panel(self):
+        self.open_panel()
+        panel = self.g.widgets.wh3pt_battle_panel
+        for name in ('general', 'doctrine', 'general_pick', 'general_key', 'general_line', 'status'):
+            widget = self.g.widgets['wh3pt_battle_' + name]
+            self.assertLessEqual(widget.y + widget.h, panel.y + panel.h, name)
+            self.assertLessEqual(widget.x + widget.w, panel.x + panel.w, name)
+
+    def test_the_commander_runs_on_its_own_timer_and_commands(self):
+        self.battlefield()
+        self.open_panel()
+        self.click('general')
+        self.g.timers.wh3pt_battle_general()
+        attacks = self.g.attacks
+        self.assertEqual(len(attacks), 2)
+        self.assertEqual(attacks[1].target.id, self.g.enemy.id)
+        self.assertIn('托管 2 队', self.g.widgets.wh3pt_battle_general_line.text)
+
+    def test_a_campaign_switch_starts_the_commander_for_the_owner(self):
+        self.publish_campaign_magic()
+        self.g.svr.wh3pt_general_enabled = True
+        self.api.start()
+        self.assertEqual(self.api.general.mode(), 'all')
+
+    def test_no_campaign_switch_no_commander(self):
+        self.publish_campaign_magic()
+        self.api.start()
+        self.assertEqual(self.api.general.mode(), 'off')
+
+    def test_multiplayer_and_replays_get_no_commander(self):
+        self.battlefield()
+        self.g.multiplayer = True
+        self.api.general.set_mode('all')
+        self.api.general_tick()
+        self.assertEqual(len(self.g.attacks), 0)
+
+    def test_a_players_order_reaches_the_commander(self):
+        self.battlefield()
+        self.open_panel()
+        self.click('general')
+        self.g.battle_clock = 1000
+        self.g.timers.wh3pt_battle_general()
+        self.g.common.selected[self.g.own.id] = True
+        self.g.battle_clock = 1500
+        self.g.commands.Move()
+        self.assertTrue(self.api.general.paused(self.g.own.id))
+        self.assertFalse(self.api.general.paused(self.g.ordinary.id))
+
+    def test_picking_nothing_asks_for_a_selection(self):
+        self.battlefield()
+        self.open_panel()
+        self.click('general_pick')
+        self.assertEqual(self.api.status()[0], '先选中部队')
+
+    def press(self, key):
+        self.g.core.trigger_event(self.g.core, 'ShortcutTriggered', self.lua.table_from({'string': key}))
+
+    def hotkey_panel(self):
+        self.battlefield()
+        self.open_panel()
+        self.g.common.selected[self.g.own.id] = True
+
+    def test_shift_f9_hands_selected_units_over_and_takes_them_back(self):
+        self.hotkey_panel()
+        self.press('camera_bookmark_save0')
+        self.assertTrue(self.api.general.managed(self.g.own.id))
+        self.assertFalse(self.api.general.managed(self.g.ordinary.id))
+        self.g.timers.wh3pt_battle_general()
+        self.assertEqual(len(self.g.attacks), 1)
+        self.press('camera_bookmark_save0')
+        self.assertFalse(self.api.general.managed(self.g.own.id))
+        self.g.timers.wh3pt_battle_general()
+        self.assertFalse(self.api.general.managed(self.g.own.id))
+
+    def test_a_second_press_undoes_the_first_before_any_tick_has_run(self):
+        self.hotkey_panel()
+        self.press('camera_bookmark_save0')
+        self.press('camera_bookmark_save0')
+        self.g.timers.wh3pt_battle_general()
+        self.assertEqual(len(self.g.attacks), 0)
+
+    def test_a_mixed_selection_goes_back_to_the_player(self):
+        self.hotkey_panel()
+        self.press('camera_bookmark_save0')
+        self.g.common.selected[self.g.ordinary.id] = True
+        self.press('camera_bookmark_save0')
+        self.assertFalse(self.api.general.managed(self.g.own.id))
+        self.assertFalse(self.api.general.managed(self.g.ordinary.id))
+
+    def test_the_launcher_reports_a_hotkey_press_with_the_panel_shut(self):
+        self.hotkey_panel()
+        launcher = self.g.widgets.wh3pt_battle_open
+        self.press('camera_bookmark_save0')
+        self.assertEqual(launcher.text, 'AI 接管 1 队')
+        self.press('camera_bookmark_save0')
+        self.assertEqual(launcher.text, '已收回 1 队')
+        self.g.timers.wh3pt_battle_flash()
+        self.assertEqual(launcher.text, '◆ 修改器 [F9]')
+
+    def test_only_the_latest_flash_clears_the_launcher(self):
+        self.hotkey_panel()
+        launcher = self.g.widgets.wh3pt_battle_open
+        self.press('camera_bookmark_save0')
+        first = self.g.timers.wh3pt_battle_flash
+        self.press('camera_bookmark_save0')
+        first()
+        self.assertEqual(launcher.text, '已收回 1 队')
+
+    def test_a_press_with_nothing_selected_says_so(self):
+        self.battlefield()
+        self.open_panel()
+        self.press('camera_bookmark_save0')
+        self.assertEqual(self.g.widgets.wh3pt_battle_open.text, '先选中部队')
+
+    def test_a_press_marks_the_card_at_once_even_while_paused(self):
+        self.battlefield()
+        self.lua.execute('''
+            cards=root:CreateComponent('review_DY','ui/wh3pt/label')
+            own_card=cards:CreateComponent(tostring(own.id),'ui/wh3pt/label')
+            function find_uicomponent(parent,...) return cards end
+        ''')
+        self.open_panel()
+        self.g.common.selected[self.g.own.id] = True
+        self.press('camera_bookmark_save0')
+        mark = self.g.own_card.Find(self.g.own_card, 'wh3pt_general_mark')
+        self.assertEqual(mark.state, 'ok_dot')
+        self.press('camera_bookmark_save0')
+        self.assertFalse(mark.visible)
+
+    def test_multiplayer_ignores_the_hotkey(self):
+        self.hotkey_panel()
+        self.g.multiplayer = True
+        self.press('camera_bookmark_save0')
+        self.assertFalse(self.api.general.managed(self.g.own.id))
+
+    def test_the_button_shows_the_key_the_game_really_has_on_the_shortcut(self):
+        self.lua.execute("bound_keys={camera_bookmark_save0='Shift + F7'}")
+        self.hotkey_panel()
+        self.assertEqual(self.g.widgets.wh3pt_battle_general_key.text, '快捷键：Shift + F7')
+
+    def test_the_button_falls_back_to_the_default_name(self):
+        self.hotkey_panel()
+        self.assertEqual(self.g.widgets.wh3pt_battle_general_key.text, '快捷键：Shift+F9')
+
+    def test_a_new_hotkey_is_learned_from_the_next_press_and_replaces_the_old_one(self):
+        self.lua.execute('''
+            bound_keys={toggle_labels='Ctrl + T'}
+            shortcut_names={shortcut_localisation_onscreen_toggle_labels='切换单位标签'}
+        ''')
+        self.hotkey_panel()
+        button = self.g.widgets.wh3pt_battle_general_key
+        self.click('general_key')
+        self.assertEqual(button.text, '按下新快捷键…')
+        self.press('toggle_labels')
+        self.assertEqual(button.text, '快捷键：Ctrl + T')
+        self.assertEqual(self.api.hotkey(), ('toggle_labels', False))
+        self.assertEqual(self.g.registry.wh3pt_general_hotkey, 'toggle_labels')
+        self.assertIn('切换单位标签', self.api.status()[0])
+        self.assertFalse(self.api.general.managed(self.g.own.id))      # learning is not using
+        self.press('camera_bookmark_save0')
+        self.assertFalse(self.api.general.managed(self.g.own.id))
+        self.press('toggle_labels')
+        self.assertTrue(self.api.general.managed(self.g.own.id))
+
+    def test_the_chosen_hotkey_survives_into_the_next_battle(self):
+        self.g.registry.wh3pt_general_hotkey = 'camera_bookmark_save5'
+        self.lua.execute("bound_keys={camera_bookmark_save5='Alt + Z'}")
+        self.hotkey_panel()
+        self.assertEqual(self.api.hotkey(), ('camera_bookmark_save5', False))
+        self.assertEqual(self.g.widgets.wh3pt_battle_general_key.text, '快捷键：Alt + Z')
+        self.press('camera_bookmark_save5')
+        self.assertTrue(self.api.general.managed(self.g.own.id))
+
+    def test_a_registry_that_cannot_be_read_or_written_leaves_a_working_key(self):
+        self.lua.execute('''
+            function core:svr_load_registry_string() error('no registry') end
+            function core:svr_save_registry_string() error('no registry') end
+        ''')
+        self.hotkey_panel()
+        self.assertEqual(self.api.hotkey()[0], 'camera_bookmark_save0')
+        self.click('general_key')
+        self.press('camera_bookmark_save1')
+        self.assertEqual(self.api.hotkey(), ('camera_bookmark_save1', False))
+
+    def test_f9_cannot_be_taken_and_does_not_close_the_panel_while_learning(self):
+        self.hotkey_panel()
+        self.click('open')
+        panel = self.g.widgets.wh3pt_battle_panel
+        self.assertTrue(panel.visible)
+        self.click('general_key')
+        self.press('camera_bookmark_view0')
+        self.assertTrue(panel.visible)
+        self.assertEqual(self.api.hotkey(), ('camera_bookmark_save0', True))
+        self.assertIn('F9', self.api.status()[0])
+        self.press('camera_bookmark_save1')
+        self.assertEqual(self.api.hotkey(), ('camera_bookmark_save1', False))
+
+    def test_camera_keys_cannot_be_taken(self):
+        self.hotkey_panel()
+        self.click('general_key')
+        for key in ('step_fwd', 'rot_l', 'cam_up'):
+            self.press(key)
+            self.assertEqual(self.api.hotkey(), ('camera_bookmark_save0', True))
+
+    def test_learning_can_be_cancelled_three_ways(self):
+        self.hotkey_panel()
+        button = self.g.widgets.wh3pt_battle_general_key
+        self.click('general_key')
+        self.press('escape_menu')
+        self.assertEqual(self.api.hotkey(), ('camera_bookmark_save0', False))
+        self.click('general_key')
+        self.click('general_key')
+        self.assertEqual(self.api.hotkey(), ('camera_bookmark_save0', False))
+        self.click('general_key')
+        self.g.timers.wh3pt_battle_capture()
+        self.assertEqual(self.api.hotkey(), ('camera_bookmark_save0', False))
+        self.assertEqual(button.text, '快捷键：Shift+F9')
+        self.assertIsNone(self.g.registry.wh3pt_general_hotkey)
+
+    def test_an_old_learning_timeout_does_not_end_a_new_one(self):
+        self.hotkey_panel()
+        self.click('general_key')
+        old = self.g.timers.wh3pt_battle_capture
+        self.click('general_key')
+        self.click('general_key')
+        old()
+        self.assertEqual(self.api.hotkey(), ('camera_bookmark_save0', True))
+
+    def test_f9_puts_the_camera_back_while_shift_f9_is_the_hotkey(self):
+        self.hotkey_panel()
+        self.press('camera_bookmark_view0')
+        self.assertTrue(self.g.widgets.wh3pt_battle_panel.visible)
+        self.g.timers.wh3pt_battle_keep_camera()
+        move = self.g.camera.moves[1]
+        self.assertEqual((move.position, move.target, move.time, move.fov), ('camera_pos', 'camera_target', 0, -1))
+        self.assertFalse(move.queue)        # works while paused too
+
+    def test_f9_leaves_the_camera_alone_with_any_other_hotkey(self):
+        self.hotkey_panel()
+        self.g.registry.wh3pt_general_hotkey = 'camera_bookmark_save1'
+        other = self.module.new(self.g.bm)
+        other.start()
+        other.shortcut('camera_bookmark_view0')
+        self.assertIsNone(self.g.timers.wh3pt_battle_keep_camera)
+
+    def test_a_camera_that_cannot_be_read_does_not_stop_f9(self):
+        self.hotkey_panel()
+        self.lua.execute("function bm:camera() error('no camera') end")
+        self.press('camera_bookmark_view0')
+        self.assertTrue(self.g.widgets.wh3pt_battle_panel.visible)
+
+    def test_picking_selected_units_hands_them_over(self):
+        self.battlefield()
+        self.open_panel()
+        self.g.common.selected[self.g.own.id] = True
+        self.click('general_pick')
+        self.assertIn('1 队', self.api.status()[0])
+        self.g.timers.wh3pt_battle_general()
+        self.assertTrue(self.api.general.managed(self.g.own.id))
+        self.assertFalse(self.api.general.managed(self.g.ordinary.id))
+
+    def test_unit_cards_show_who_answers_to_the_commander(self):
+        self.battlefield()
+        self.lua.execute('''
+            cards=root:CreateComponent('review_DY','ui/wh3pt/label')
+            own_card=cards:CreateComponent(tostring(own.id),'ui/wh3pt/label')
+            other_card=cards:CreateComponent('9999','ui/wh3pt/label')
+            function find_uicomponent(parent,...) return cards end
+        ''')
+        self.open_panel()
+        self.click('general')
+        self.g.battle_clock = 1000
+        self.g.timers.wh3pt_battle_general()
+        mark = self.g.own_card.Find(self.g.own_card, 'wh3pt_general_mark')
+        self.assertEqual(mark.state, 'ok_dot')
+        self.assertTrue(mark.visible)
+        self.assertIsNone(self.g.other_card.Find(self.g.other_card, 'wh3pt_general_mark'))
+        self.g.common.selected[self.g.own.id] = True
+        self.g.battle_clock = 1500
+        self.g.commands.Move()
+        self.g.timers.wh3pt_battle_general()
+        self.assertEqual(mark.state, 'busy_dot')
+        self.click('general'); self.click('general'); self.click('general')
+        self.g.timers.wh3pt_battle_general()
+        self.assertFalse(mark.visible)
+
+    def test_cards_that_cannot_be_found_are_not_a_problem(self):
+        self.battlefield()
+        self.open_panel()
+        self.click('general')
+        self.g.timers.wh3pt_battle_general()    # find_uicomponent does not even exist here
+
+    def test_the_battle_end_stops_the_commander(self):
+        self.battlefield()
+        self.open_panel()
+        self.click('general')
+        self.g.timers.wh3pt_battle_general()
+        self.g.phases.Complete()
+        self.assertIsNone(self.g.timers.wh3pt_battle_general)
+        self.assertFalse(self.api.general.managed(self.g.own.id))
+
+    def test_victory_turns_the_commander_to_pursuit(self):
+        self.battlefield()
+        self.open_panel()
+        self.click('general')
+        self.g.conflict = False
+        self.g.phases.VictoryCountdown()
+        self.g.timers.wh3pt_battle_general()
+        self.assertEqual(self.api.general.phase(), 'pursuit')
+
+    def test_a_failure_in_the_commander_never_reaches_the_other_timers(self):
+        self.battlefield()
+        self.open_panel()
+        self.click('general')
+        self.lua.execute("function bm:get_non_player_alliance() error('gone') end")
+        for _ in range(3):
+            self.g.timers.wh3pt_battle_general()
+        self.assertEqual(self.api.general.mode(), 'off')
+        self.g.timers.wh3pt_battle_revival()
+
+    def test_units_under_the_native_ai_keep_every_other_feature(self):
+        self.battlefield()
+        self.open_panel()
+        self.click('general')
+        self.g.timers.wh3pt_battle_general()
+        self.g.own.player = False
+        self.g.own.men = 10
+        self.api.action('revive')
+        self.assertGreater(self.g.own.men, 10)
 
 
 if __name__ == '__main__':

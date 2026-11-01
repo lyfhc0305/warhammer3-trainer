@@ -74,7 +74,7 @@ class TrainerTests(unittest.TestCase):
     def test_all_basic(self):
         options = Options(**{k: True for k, v in asdict(Options()).items() if type(v) is bool})
         files = self.unpack(build(GAME, options)[0])
-        self.assertTrue(any(n.endswith('aigeneral_iii_main.lua') for n in files))
+        self.assertFalse(any('aigeneral' in n or 'pancake' in n for n in files))
         self.assertFalse(any(n.endswith('.rpfm_reserved') for n in files))
         phase = next(b for n, b in files.items() if n.startswith('db\\special_ability_phases_tables\\'))
         version, rows = decode('special_ability_phases_tables', phase)

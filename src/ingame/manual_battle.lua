@@ -49,7 +49,7 @@ local function create_manual_battle(env)
         if autoresolved then log('autoresolve: no combat modifiers'); return end
         local ok, result = pcall(function()
             local f, count = env.faction(), 0
-            local settings = {magic=false, cooldown=false, silence=false, revive=0, vigour=false}
+            local settings = {magic=false, cooldown=false, silence=false, general=false, revive=0, vigour=false}
             for _, def in ipairs(env.catalog) do
                 if def.manual_battle then
                     local active, value = api.read(def)
@@ -69,6 +69,7 @@ local function create_manual_battle(env)
             core:svr_save_bool('wh3pt_magic_enabled', settings.magic)
             core:svr_save_bool('wh3pt_cooldown_enabled', settings.cooldown)
             core:svr_save_bool('wh3pt_silence_enabled', settings.silence)
+            core:svr_save_bool('wh3pt_general_enabled', settings.general)
             core:svr_save_bool('wh3pt_vigour_enabled', settings.vigour)
             core:svr_save_string('wh3pt_revive_level', tostring(settings.revive))
             -- Commit last; consumed once by the next battle Lua session.

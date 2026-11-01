@@ -6,6 +6,18 @@ local function new_battle_trainer(manager)
     local fatigue_on, fatigue_text, fatigue_tries, fatigue_cleared = false, '', {}, {}
     local campaign_revive_rate
     local magic_ui, cooldown_ui, fatigue_ui, silence_ui
+    local general_ui, doctrine_ui, pick_ui, general_line, key_ui
+    -- The commander's hotkey is one of the game's own shortcuts: scripts never see raw
+    -- keys, only shortcuts by name, on whatever key the player has them.
+    local DEFAULT_HOTKEY, HOTKEY_SETTING = 'camera_bookmark_save0', 'wh3pt_general_hotkey'
+    local LAUNCHER_TEXT = '◆ 修改器 [F9]'
+    local PANEL_KEYS = {script_F9=true, F9=true, f9=true, camera_bookmark_view0=true,
+        toggle_stream_pause=true, script_F8=true, F8=true}
+    -- What the player sees if the game cannot say which key a shortcut is on.
+    local KEY_NAMES = {camera_bookmark_save0='Shift+F9', camera_bookmark_save1='Shift+F10',
+        camera_bookmark_save2='Shift+F11', camera_bookmark_save3='Shift+F12',
+        camera_bookmark_view1='F10', camera_bookmark_view2='F11', camera_bookmark_view3='F12'}
+    local hotkey, capturing, capture_token, flash_token = DEFAULT_HOTKEY, false, 0, 0
     local controllers = {}
     local tracked, panel, launcher, status_ui, mode_ui = {}, nil, nil, nil, nil
     local home_x, home_y, drag_x, drag_y, watch_launcher
@@ -16,6 +28,7 @@ local function new_battle_trainer(manager)
     local fatigued = {threshold_active=true, threshold_winded=true, threshold_tired=true,
         threshold_very_tired=true, threshold_exhausted=true}
     local api = {}
+    local general
     local function allowed()
         return not stopped and not manager:is_multiplayer() and not manager:is_replay()
     end
@@ -40,10 +53,37 @@ local function new_battle_trainer(manager)
             local list = armies:item(a):units()
             for i = 1, list:count() do
                 local u = list:item(i)
-                if u:is_player_controlled() then result[#result + 1] = u end
+                -- Under the game's AI a unit stops reading as the player's.
+                if u:is_player_controlled() or general.owns(u) then result[#result + 1] = u end
             end
         end
         return result
+    end
+    local GENERAL_MODES = {off='关', all='全军', no_lord='除主将外', reinforcements='仅援军'}
+    local GENERAL_DOCTRINES = {auto='自动', attack='进攻', hold='固守', native='原生 AI'}
+    local function shortcut_text(key)
+        local ok, text = pcall(function() return common.get_localised_string('shortcut_localisation_onscreen_' .. key) end)
+        return ok and type(text) == 'string' and text ~= '' and text or nil
+    end
+    local function hotkey_name(key)
+        local ok, text = pcall(function()
+            return common.get_context_value('CcoBattleRoot', '', 'ShortcutKey("' .. key .. '")')
+        end)
+        if ok and type(text) == 'string' and text ~= '' then return text end
+        return KEY_NAMES[key] or shortcut_text(key) or key
+    end
+    local function update_hotkey_button()
+        if not key_ui then return end
+        key_ui:SetStateText(capturing and '按下新快捷键…' or '快捷键：' .. hotkey_name(hotkey))
+        key_ui:SetState(capturing and 'enabled' or 'active')
+    end
+    local function update_general_buttons()
+        if general_ui then
+            general_ui:SetStateText('AI 将军：' .. GENERAL_MODES[general.mode()])
+            general_ui:SetState(general.mode() == 'off' and 'active' or 'enabled')
+        end
+        if doctrine_ui then doctrine_ui:SetStateText('战术：' .. GENERAL_DOCTRINES[general.doctrine()]) end
+        if general_line then general_line:SetStateText(general.status()) end
     end
     local function update_magic_buttons()
         if magic_ui then magic_ui:SetStateText('无限魔法之风：' .. (magic_on and '开' or '关')); magic_ui:SetState(magic_on and 'enabled' or 'active') end
@@ -264,6 +304,95 @@ local function new_battle_trainer(manager)
             entry.unit:disable_special_ability(ability, value)
         end
     end
+    -- A dot on the unit card shows who answers to the commander. Looked up afresh each
+    -- time: cards come and go, and a kept handle to a dead one is a crash.
+    local function mark_cards()
+        local found, cards = pcall(find_uicomponent, core:get_ui_root(), 'battle_orders', 'cards_panel', 'review_DY')
+        if not found or not cards then return end
+        for i = 0, cards:ChildCount() - 1 do
+            local card = UIComponent(cards:Find(i))
+            local id = tonumber(card:Id())
+            if id then
+                local managed = general.managed(id)
+                local mark = card:Find('wh3pt_general_mark')
+                if managed and not mark then
+                    mark = card:CreateComponent('wh3pt_general_mark', 'ui/wh3pt/card')
+                end
+                if mark then
+                    mark = UIComponent(mark)
+                    mark:SetVisible(managed)
+                    if managed then
+                        mark:SetState(general.paused(id) and 'busy_dot' or 'ok_dot')
+                        mark:SetCanResizeWidth(true); mark:SetCanResizeHeight(true)
+                        mark:Resize(10, 10)
+                        mark:SetDockingPoint(3)
+                        mark:SetDockOffset(-3, 3)
+                    end
+                end
+            end
+        end
+    end
+    -- The panel is usually shut when a hotkey is used, so the launcher says what happened.
+    local function flash(text)
+        if not launcher then return end
+        flash_token = flash_token + 1
+        local token = flash_token
+        launcher:SetStateText(text)
+        manager:real_callback(function()
+            if token == flash_token and not stopped then launcher:SetStateText(LAUNCHER_TEXT) end
+        end, 2500, 'wh3pt_battle_flash')
+    end
+    local function toggle_selected()
+        local given, count = general.toggle_selected()
+        local text = given == nil and '先选中部队' or (given and 'AI 接管 ' or '已收回 ') .. count .. ' 队'
+        report(text)
+        flash(text)
+        update_general_buttons()
+        mark_cards()
+    end
+    local function stop_capture(text)
+        capturing = false
+        update_hotkey_button()
+        report(text)
+    end
+    local function start_capture()
+        capturing, capture_token = true, capture_token + 1
+        local token = capture_token
+        update_hotkey_button()
+        report('按下想用的快捷键；Esc 或再点一次取消')
+        manager:real_callback(function()
+            if capturing and token == capture_token then guard(function() stop_capture('没等到按键，快捷键未改') end) end
+        end, 10000, 'wh3pt_battle_capture')
+    end
+    local function capture(key)
+        if key == 'escape_menu' then return stop_capture('快捷键未改') end
+        if PANEL_KEYS[key] then return report('F9 用来开面板，换一个键') end
+        -- Held camera keys repeat, and each repeat would hand the units back and forth.
+        if string.match(key, '^step_') or string.match(key, '^rot_') or string.match(key, '^cam_') then
+            return report('这个键用来移动镜头，换一个键')
+        end
+        hotkey = key
+        pcall(function() core:svr_save_registry_string(HOTKEY_SETTING, key) end)
+        local original = shortcut_text(key)
+        stop_capture('快捷键已改为 ' .. hotkey_name(key)
+            .. (original and '，原功能「' .. original .. '」也会触发' or ''))
+    end
+    -- Shift+F9 is also the game's "save camera 1" and F9 its "view camera 1", so the panel
+    -- key would throw the camera back to where the last hotkey press left it. Undone here:
+    -- disabling either shortcut could silence the event this all depends on.
+    local function keep_camera()
+        local camera = manager:camera()
+        local position, target = camera:position(), camera:target()
+        manager:real_callback(function()
+            pcall(function() camera:move_to(position, target, 0, false, -1, false) end)
+        end, 60, 'wh3pt_battle_keep_camera')
+    end
+    function api.general_tick()
+        if not allowed() then return end
+        general.tick()
+        update_general_buttons()
+        mark_cards()
+    end
     function api.tick(full)
         if not allowed() then return end
         local restored, missing, failures, affected = 0, 0, 0, 0
@@ -326,6 +455,18 @@ local function new_battle_trainer(manager)
             update_magic_buttons()
             return
         end
+        if action == 'general' or action == 'doctrine' then
+            if action == 'general' then general.cycle_mode() else general.cycle_doctrine() end
+            update_general_buttons()
+            report(action == 'general' and 'AI 将军：' .. GENERAL_MODES[general.mode()]
+                or '战术：' .. GENERAL_DOCTRINES[general.doctrine()])
+            return
+        end
+        if action == 'general_pick' then return toggle_selected() end
+        if action == 'general_key' then
+            if capturing then return stop_capture('快捷键未改') end
+            return start_capture()
+        end
         if action == 'mode' then
             mode = mode == 'inherit' and 'on' or mode == 'on' and 'off' or 'inherit'
             if mode_ui then mode_ui:SetStateText('持续复活：' .. ({inherit='跟随战役', on='开', off='关'})[mode]) end
@@ -381,6 +522,18 @@ local function new_battle_trainer(manager)
         local open = panel:Visible(true)
         if not open then place_panel() end
         panel:SetVisible(not open)
+    end
+    function api.shortcut(key)
+        if capturing then
+            if PANEL_KEYS[key] and hotkey == DEFAULT_HOTKEY then pcall(keep_camera) end
+            return capture(key)
+        end
+        if PANEL_KEYS[key] then
+            toggle_panel()
+            if hotkey == DEFAULT_HOTKEY then pcall(keep_camera) end
+        elseif key == hotkey and allowed() then
+            toggle_selected()
+        end
     end
     -- Until the player places it the launcher sits left of the bar behind the speed
     -- buttons, which reaches further than the radar. Only the bar's size is read:
@@ -483,10 +636,10 @@ local function new_battle_trainer(manager)
         launcher_s, placed = s, saved_x ~= nil
         ox = math.max(0, math.min(w - lw * s, tonumber(saved_x) or 0))
         oy = math.max(0, math.min(h - lh * s, tonumber(saved_y) or 6 * s))
-        launcher = make(root, 'open', 'button', 0, 0, lw, lh, '◆ 修改器 [F9]', 'accent')
+        launcher = make(root, 'open', 'button', 0, 0, lw, lh, LAUNCHER_TEXT, 'accent')
         home_x, home_y = launcher:Position()
         if launcher.SetMoveable then pcall(function() launcher:SetMoveable(true) end) end
-        panel = make(root, 'panel', 'card', 0, 0, 336, 174, '', 'panel_bg')
+        panel = make(root, 'panel', 'card', 0, 0, 336, 262, '', 'panel_bg')
         dock_launcher()
         place_panel()
         ox, oy = panel:Position()
@@ -501,12 +654,23 @@ local function new_battle_trainer(manager)
         magic_ui = make(panel, 'magic', 'button', 10, 96, 155, 26, '')
         cooldown_ui = make(panel, 'cooldown', 'button', 171, 96, 155, 26, '')
         silence_ui = make(panel, 'silence', 'button', 10, 126, 316, 26, '')
+        general_ui = make(panel, 'general', 'button', 10, 156, 155, 26, '')
+        doctrine_ui = make(panel, 'doctrine', 'button', 171, 156, 155, 26, '')
+        pick_ui = make(panel, 'general_pick', 'button', 10, 186, 155, 26, '托管 / 收回选中部队')
+        key_ui = make(panel, 'general_key', 'button', 171, 186, 155, 26, '')
+        general_line = make(panel, 'general_line', 'label', 12, 214, 312, 22, '', 'hint')
         update_magic_buttons()
+        update_general_buttons()
+        update_hotkey_button()
         mode_ui:SetTooltipText('点击在 跟随战役 / 开 / 关 之间切换；复活以开战人数为上限，仅手动战斗。', true)
         magic_ui:SetTooltipText('继承战役设置，可在本场独立切换；每0.1秒补充玩家军队魔法池至至少30、储备至至少100。关闭后停止补充。', true)
         cooldown_ui:SetTooltipText('继承战役设置，可在本场独立切换；每0.5秒重置玩家部队全部主动技能与法术的冷却和使用次数。仍需施法动作和有效目标，法术仍消耗魔法。', true)
         silence_ui:SetTooltipText('继承战役设置，可在本场独立切换；只作用于敌方。每秒禁用敌方单位的法术、主动技能和会触发召唤的被动，召唤出的部队到场即清除。军队技能无法禁用，炮击和增益类军队技能仍可能释放。关闭后恢复敌方技能。', true)
-        status_ui = make(panel, 'status', 'label', 12, 152, 312, 22, last_status, 'hint')
+        general_ui:SetTooltipText('点击在 关 / 全军 / 除主将外 / 仅援军 之间切换。部队仍在你手里：随时可以下令，你下的命令优先，15 秒内 AI 不再插手这支部队。', true)
+        doctrine_ui:SetTooltipText('自动：按敌我强弱决定固守或推进。进攻：立刻列阵推进。固守：只打靠近的敌人。原生 AI：交给游戏自带 AI，部队卡牌变灰；城墙攻防战默认用它。', true)
+        pick_ui:SetTooltipText('单独交出或收回选中的部队，不受上面的模式限制，和快捷键效果相同。卡牌右上角绿点表示 AI 指挥中，黄点表示你刚接管。', true)
+        key_ui:SetTooltipText('点一下，再按下想用的快捷键。Esc 或再点一次取消。只能用游戏里绑了功能的键，它原来的功能也会触发；想用没被占用的键，先在 选项 → 控制 里把它绑给一个空闲项（如 保存视角 5）。', true)
+        status_ui = make(panel, 'status', 'label', 12, 236, 312, 22, last_status, 'hint')
         status_ui:SetTooltipText(last_status, true)
         panel:SetVisible(false)
         keep_docking()
@@ -517,6 +681,8 @@ local function new_battle_trainer(manager)
         core:svr_save_bool('wh3pt_magic_pending', false)
         if not allowed() then return false end
         started = true
+        local loaded, saved_key = pcall(function() return core:svr_load_registry_string(HOTKEY_SETTING) end)
+        if loaded and type(saved_key) == 'string' and saved_key ~= '' then hotkey = saved_key end
         guard(function()
             if not pending then return end
             local owner = core:svr_load_string('wh3pt_magic_owner')
@@ -527,6 +693,7 @@ local function new_battle_trainer(manager)
                     magic_on = core:svr_load_bool('wh3pt_magic_enabled') == true
                     cooldown_on = core:svr_load_bool('wh3pt_cooldown_enabled') == true
                     silence_on = core:svr_load_bool('wh3pt_silence_enabled') == true
+                    if core:svr_load_bool('wh3pt_general_enabled') == true then general.set_mode('all') end
                     fatigue_on = core:svr_load_bool('wh3pt_vigour_enabled') == true
                     if fatigue_on then show_fatigue('开战后清除疲劳') end
                     local level = tonumber(core:svr_load_string('wh3pt_revive_level'))
@@ -542,7 +709,9 @@ local function new_battle_trainer(manager)
                 or c.string == 'wh3pt_battle_mode' or c.string == 'wh3pt_battle_revive'
                 or c.string == 'wh3pt_battle_heal' or c.string == 'wh3pt_battle_ammo'
                 or c.string == 'wh3pt_battle_magic' or c.string == 'wh3pt_battle_cooldown'
-                or c.string == 'wh3pt_battle_silence'
+                or c.string == 'wh3pt_battle_silence' or c.string == 'wh3pt_battle_general'
+                or c.string == 'wh3pt_battle_doctrine' or c.string == 'wh3pt_battle_general_pick'
+                or c.string == 'wh3pt_battle_general_key'
         end, function(c) guard(function()
             if c.string == 'wh3pt_battle_open' then
                 if not drop_launcher() then toggle_panel() end
@@ -550,11 +719,9 @@ local function new_battle_trainer(manager)
             elseif c.string == 'wh3pt_battle_close' then toggle_panel()
             else api.action(string.gsub(c.string, '^wh3pt_battle_', '')) end
         end) end, true)
-        core:add_listener('wh3pt_battle_hotkey', 'ShortcutTriggered', function(c)
-            return c.string == 'script_F9' or c.string == 'F9' or c.string == 'f9'
-                or c.string == 'camera_bookmark_view0' or c.string == 'toggle_stream_pause'
-                or c.string == 'script_F8' or c.string == 'F8'
-        end, function() guard(toggle_panel) end, true)
+        core:add_listener('wh3pt_battle_hotkey', 'ShortcutTriggered', true, function(c)
+            guard(function() api.shortcut(c.string) end)
+        end, true)
         core:add_listener('wh3pt_battle_mouse_on', 'ComponentMouseOn', function(c)
             return c.string == 'wh3pt_battle_open'
         end, function() hover = true; guard(start_watching) end, true)
@@ -570,14 +737,23 @@ local function new_battle_trainer(manager)
             guard(api.silence_tick)
         end, 1000, 'wh3pt_battle_revival')
         manager:repeat_callback(function() guard(api.magic_tick) end, 100, 'wh3pt_battle_magic')
+        manager:repeat_callback(function() guard(api.general_tick) end, GENERAL_TUNE.tick, 'wh3pt_battle_general')
+        for _, command_name in ipairs({'Move', 'Move Orientation Width', 'Move Rotation Angle', 'Attack Unit',
+                'Attack Building', 'Climb/Dock Building', 'Special Ability', 'Halt', 'Withdraw'}) do
+            manager:register_command_handler_callback(command_name, function() guard(general.player_order) end,
+                'wh3pt_general_' .. command_name)
+        end
         manager:register_phase_change_callback('VictoryCountdown', function()
             final_phase = true
+            general.victory()
             guard(function() api.tick(true) end)
         end)
         manager:register_phase_change_callback('Complete', function()
             stopped = true
             manager:remove_process('wh3pt_battle_revival')
             manager:remove_process('wh3pt_battle_magic')
+            manager:remove_process('wh3pt_battle_general')
+            guard(general.stop)
             magic_on, cooldown_on, fatigue_on, silence_on, controllers = false, false, false, false, {}
             if panel then panel:SetVisible(false) end
         end)
@@ -588,6 +764,13 @@ local function new_battle_trainer(manager)
     function api.magic_state() return magic_on, cooldown_on end
     function api.fatigue_state() return fatigue_on, fatigue_text end
     function api.silence_state() return silence_on, silence_blocked, silence_removed end
+    function api.hotkey() return hotkey, capturing end
+    general = new_general(manager, {data=GENERAL_DATA, log=log, report=report,
+        free_cooldowns=function() return cooldown_on end,
+        walled=function()
+            return manager:is_siege_battle() and not string.find(tostring(manager:battle_type()), 'unfortified')
+        end})
+    api.general = general
     return api
 end
 

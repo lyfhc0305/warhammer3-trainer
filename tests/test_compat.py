@@ -108,12 +108,12 @@ class CompatibilityTests(unittest.TestCase):
         self.assertIn('v7 → v8', status.desc)
 
     def test_installer_offers_an_update_when_the_installed_pack_is_older(self):
-        self.game.pack(self.TRACKED, version='1.0.0', addons=addon_record(['ai']))
+        self.game.pack(self.TRACKED, version='1.0.0', addons=addon_record(['building']))
         status = detect_installed_mode(self.game.path)
         self.assertEqual(status.kind, 'info')
         self.assertIn(trainer_core.VERSION, status.title)
         self.assertIn('1.0.0', status.desc)
-        self.assertEqual(status.addons['enabled'], ['ai'])  # an update keeps the modules
+        self.assertEqual(status.addons['enabled'], ['building'])  # an update keeps the modules
 
     def test_installer_flags_packs_from_before_manifests(self):
         self.pack.write_bytes(write_pack(MARKER))
@@ -127,11 +127,14 @@ class CompatibilityTests(unittest.TestCase):
         self.assertEqual(record, {'enabled': ['cap', 'shop'], 'values': {'cap_value': 75.0}})
         self.game.pack(self.TRACKED, addons=record)
         self.assertEqual(manifest_addons(read_manifest(self.pack)), record)
-        self.assertEqual(manifest_addons({'addons': {'enabled': ['ai'], 'values': {'cap_value': 'x'}}}),
-                         {'enabled': ['ai'], 'values': {}})
+        self.assertEqual(manifest_addons({'addons': {'enabled': ['building'], 'values': {'cap_value': 'x'}}}),
+                         {'enabled': ['building'], 'values': {}})
+        # The module that became part of every build falls out of old records quietly.
+        self.assertEqual(manifest_addons({'addons': {'enabled': ['ai', 'cap'], 'values': {}}}),
+                         {'enabled': ['cap'], 'values': {}})
         self.game.pack(self.TRACKED)
         self.assertIsNone(manifest_addons(read_manifest(self.pack)))
-        self.assertIsNone(manifest_addons({'addons': 'ai'}))
+        self.assertIsNone(manifest_addons({'addons': 'cap'}))
 
     def test_installer_names_the_installed_modules(self):
         self.game.pack(self.TRACKED, addons=addon_record(['shop', 'cap'], {'cap_value': 50}))
