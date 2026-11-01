@@ -64,6 +64,7 @@ local PAGES = {
     {name='战斗', title='手动战斗加成', sections={
         {'恢复', 'healing', 'revive', 'ammo'},
         {'魔法', 'battle_magic', 'battle_cooldown'},
+        {'敌方', 'battle_silence'},
         {'特性', 'vigour', 'unbreakable', 'vanguard', 'chainsword'},
         {'进攻', 'attack', 'weapon', 'missile_damage', 'range', 'reload', 'ammunition'},
         {'防御', 'defence', 'armour', 'ward', 'missile_resistance', 'health'},

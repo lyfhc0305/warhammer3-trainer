@@ -2,9 +2,10 @@
 local function new_battle_trainer(manager)
     local stopped, started, mode, final_phase = false, false, 'inherit', false
     local magic_on, cooldown_on, ability_wait = false, false, 0
+    local silence_on, silenced, silence_ready, silence_blocked, silence_removed = false, {}, false, 0, 0
     local fatigue_on, fatigue_text, fatigue_tries, fatigue_cleared = false, '', {}, {}
     local campaign_revive_rate
-    local magic_ui, cooldown_ui, fatigue_ui
+    local magic_ui, cooldown_ui, fatigue_ui, silence_ui
     local controllers = {}
     local tracked, panel, launcher, status_ui, mode_ui = {}, nil, nil, nil, nil
     local home_x, home_y, drag_x, drag_y, watch_launcher
@@ -47,6 +48,7 @@ local function new_battle_trainer(manager)
     local function update_magic_buttons()
         if magic_ui then magic_ui:SetStateText('无限魔法之风：' .. (magic_on and '开' or '关')); magic_ui:SetState(magic_on and 'enabled' or 'active') end
         if cooldown_ui then cooldown_ui:SetStateText('技能无冷却无限次数：' .. (cooldown_on and '开' or '关')); cooldown_ui:SetState(cooldown_on and 'enabled' or 'active') end
+        if silence_ui then silence_ui:SetStateText('禁止敌方技能与召唤：' .. (silence_on and '开' or '关')); silence_ui:SetState(silence_on and 'enabled' or 'active') end
     end
     local function refill_magic()
         local affected = 0
@@ -107,6 +109,59 @@ local function new_battle_trainer(manager)
         end
         return requested
     end
+    -- Disabling works per unit, so walking the enemy alliance cannot reach the player
+    -- or an allied army. battle:disable_all_abilities would take theirs as well.
+    local function silence_unit(entry, u)
+        local blocked = 0
+        local function block(key)
+            if entry.keys[key] then return end
+            u:disable_special_ability(key, true)
+            entry.keys[key] = true
+            blocked = blocked + 1
+        end
+        for _, key in pairs(u:owned_non_passive_special_abilities()) do block(key) end
+        for _, key in pairs(u:owned_passive_special_abilities()) do
+            if ENEMY_SUMMONS.passives[key] then block(key) end
+        end
+        return blocked
+    end
+    -- Army abilities belong to no unit and nothing disables them, so what they summon
+    -- is removed on arrival. Many summons are ordinary unit types: only a unit that
+    -- joins after the first pass counts, and a reinforcement army is a real arrival.
+    local function silence_enemy()
+        local armies = manager:get_non_player_alliance():armies()
+        for a = 1, armies:count() do
+            local army = armies:item(a)
+            local list = army:units()
+            for i = 1, list:count() do
+                local u = list:item(i)
+                if not u:is_player_controlled() then
+                    local id = u:unique_ui_id()
+                    local entry = silenced[id]
+                    if not entry then
+                        entry = {unit=u, keys={}, summon=silence_ready and not army:is_reinforcement_army()
+                            and ENEMY_SUMMONS.units[u:type()] == true}
+                        silenced[id] = entry
+                    end
+                    silence_blocked = silence_blocked + silence_unit(entry, u)
+                    if entry.summon and u:number_of_men_alive() > 0 then
+                        command(u, function(uc) uc:kill() end)
+                        if not entry.removed then
+                            entry.removed = true
+                            silence_removed = silence_removed + 1
+                        end
+                    end
+                end
+            end
+        end
+        silence_ready = true
+    end
+    local function release_enemy()
+        for _, entry in pairs(silenced) do
+            for key in pairs(entry.keys) do entry.unit:disable_special_ability(key, false) end
+        end
+        silenced, silence_ready, silence_blocked, silence_removed = {}, false, 0, 0
+    end
     -- Perfect vigour freezes fatigue at whatever a stance or ritual started the
     -- battle with, so bring that down once. If the freeze also blocks this call,
     -- lift the attribute for one pass. 0.01: the API divides by it, 0 is forbidden.
@@ -146,6 +201,18 @@ local function new_battle_trainer(manager)
         end
         show_fatigue('疲劳已清 ' .. cleared .. '队' .. (stuck > 0 and ' · 未清 ' .. stuck .. '队' or ''))
         return cleared, stuck
+    end
+    function api.silence_tick()
+        if not allowed() or not silence_on then return end
+        local before = silence_blocked + silence_removed
+        local ok, err = pcall(silence_enemy)
+        if not ok then
+            silence_on = false
+            update_magic_buttons()
+            report('禁止敌方技能已暂停：' .. tostring(err))
+        elseif silence_blocked + silence_removed ~= before then
+            report('已禁敌方技能 ' .. silence_blocked .. ' 项 · 清除召唤 ' .. silence_removed .. ' 队')
+        end
     end
     function api.magic_tick()
         if not allowed() then return end
@@ -245,6 +312,18 @@ local function new_battle_trainer(manager)
             if action == 'magic' and magic_on then report('无限魔法之风：持续补充 ' .. armies .. ' 支玩家军队')
             elseif action == 'cooldown' and cooldown_on then report('技能无冷却无限次数：持续重置 ' .. abilities .. ' 项技能')
             end
+            return
+        end
+        if action == 'silence' then
+            silence_on = not silence_on
+            if silence_on then
+                report('禁止敌方技能：已开启，只作用于敌方')
+                api.silence_tick()
+            else
+                release_enemy()
+                report('禁止敌方技能：已关闭')
+            end
+            update_magic_buttons()
             return
         end
         if action == 'mode' then
@@ -415,17 +494,19 @@ local function new_battle_trainer(manager)
         fatigue_ui = make(panel, 'fatigue', 'label', 110, 8, 184, 24, fatigue_text, 'hint')
         fatigue_ui:SetTooltipText('完美活力开启时生效：开战后清除部队带入战斗的疲劳。显示“未清”说明游戏拒绝了修改。', true)
         make(panel, 'close', 'button', 298, 6, 28, 26, '×')
-        mode_ui = make(panel, 'mode', 'button', 10, 38, 155, 30, '持续复活：跟随战役', 'accent')
-        make(panel, 'revive', 'button', 171, 38, 155, 30, '立即复活并补满生命')
-        make(panel, 'heal', 'button', 10, 74, 155, 30, '治疗存活成员')
-        make(panel, 'ammo', 'button', 171, 74, 155, 30, '补满弹药')
-        magic_ui = make(panel, 'magic', 'button', 10, 110, 155, 30, '')
-        cooldown_ui = make(panel, 'cooldown', 'button', 171, 110, 155, 30, '')
+        mode_ui = make(panel, 'mode', 'button', 10, 36, 155, 26, '持续复活：跟随战役', 'accent')
+        make(panel, 'revive', 'button', 171, 36, 155, 26, '立即复活并补满生命')
+        make(panel, 'heal', 'button', 10, 66, 155, 26, '治疗存活成员')
+        make(panel, 'ammo', 'button', 171, 66, 155, 26, '补满弹药')
+        magic_ui = make(panel, 'magic', 'button', 10, 96, 155, 26, '')
+        cooldown_ui = make(panel, 'cooldown', 'button', 171, 96, 155, 26, '')
+        silence_ui = make(panel, 'silence', 'button', 10, 126, 316, 26, '')
         update_magic_buttons()
         mode_ui:SetTooltipText('点击在 跟随战役 / 开 / 关 之间切换；复活以开战人数为上限，仅手动战斗。', true)
         magic_ui:SetTooltipText('继承战役设置，可在本场独立切换；每0.1秒补充玩家军队魔法池至至少30、储备至至少100。关闭后停止补充。', true)
         cooldown_ui:SetTooltipText('继承战役设置，可在本场独立切换；每0.5秒重置玩家部队全部主动技能与法术的冷却和使用次数。仍需施法动作和有效目标，法术仍消耗魔法。', true)
-        status_ui = make(panel, 'status', 'label', 12, 146, 312, 22, last_status, 'hint')
+        silence_ui:SetTooltipText('继承战役设置，可在本场独立切换；只作用于敌方。每秒禁用敌方单位的法术、主动技能和会触发召唤的被动，召唤出的部队到场即清除。军队技能无法禁用，炮击和增益类军队技能仍可能释放。关闭后恢复敌方技能。', true)
+        status_ui = make(panel, 'status', 'label', 12, 152, 312, 22, last_status, 'hint')
         status_ui:SetTooltipText(last_status, true)
         panel:SetVisible(false)
         keep_docking()
@@ -445,6 +526,7 @@ local function new_battle_trainer(manager)
                 if army:is_player_controlled() and army:faction_key() == owner then
                     magic_on = core:svr_load_bool('wh3pt_magic_enabled') == true
                     cooldown_on = core:svr_load_bool('wh3pt_cooldown_enabled') == true
+                    silence_on = core:svr_load_bool('wh3pt_silence_enabled') == true
                     fatigue_on = core:svr_load_bool('wh3pt_vigour_enabled') == true
                     if fatigue_on then show_fatigue('开战后清除疲劳') end
                     local level = tonumber(core:svr_load_string('wh3pt_revive_level'))
@@ -460,6 +542,7 @@ local function new_battle_trainer(manager)
                 or c.string == 'wh3pt_battle_mode' or c.string == 'wh3pt_battle_revive'
                 or c.string == 'wh3pt_battle_heal' or c.string == 'wh3pt_battle_ammo'
                 or c.string == 'wh3pt_battle_magic' or c.string == 'wh3pt_battle_cooldown'
+                or c.string == 'wh3pt_battle_silence'
         end, function(c) guard(function()
             if c.string == 'wh3pt_battle_open' then
                 if not drop_launcher() then toggle_panel() end
@@ -484,6 +567,7 @@ local function new_battle_trainer(manager)
         manager:repeat_callback(function()
             guard(function() api.tick(final_phase) end)
             guard(api.fatigue_tick)
+            guard(api.silence_tick)
         end, 1000, 'wh3pt_battle_revival')
         manager:repeat_callback(function() guard(api.magic_tick) end, 100, 'wh3pt_battle_magic')
         manager:register_phase_change_callback('VictoryCountdown', function()
@@ -494,7 +578,7 @@ local function new_battle_trainer(manager)
             stopped = true
             manager:remove_process('wh3pt_battle_revival')
             manager:remove_process('wh3pt_battle_magic')
-            magic_on, cooldown_on, fatigue_on, controllers = false, false, false, {}
+            magic_on, cooldown_on, fatigue_on, silence_on, controllers = false, false, false, false, {}
             if panel then panel:SetVisible(false) end
         end)
         log('Started: revival timer 1000ms; magic timer 100ms; F9 panel registered')
@@ -503,6 +587,7 @@ local function new_battle_trainer(manager)
     function api.status() return last_status, mode end
     function api.magic_state() return magic_on, cooldown_on end
     function api.fatigue_state() return fatigue_on, fatigue_text end
+    function api.silence_state() return silence_on, silence_blocked, silence_removed end
     return api
 end
 

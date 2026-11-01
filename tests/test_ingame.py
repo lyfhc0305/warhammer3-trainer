@@ -963,7 +963,7 @@ class InGameTests(unittest.TestCase):
         self.api.click('tab_军队')
         self.assertIn('全军免疫战役非战斗损耗',self.g.widgets['wh3pt_info_attrition'].text)
         self.api.click('tab_战斗')
-        self.assertEqual(len(self.list_rows()),22)
+        self.assertEqual(len(self.list_rows()),23)
         self.api.click('search_open')
         self.g.widgets['wh3pt_search'].text='不存在的功能'
         self.api.click('search_go')
@@ -979,14 +979,14 @@ class InGameTests(unittest.TestCase):
         self.assertEqual(self.list_rows(),{'order'})  # search reaches every page too
         self.api.click('search_clear')
         self.assertEqual(self.g.widgets['wh3pt_search'].text,'')
-        self.assertEqual(len(self.list_rows()),22)
+        self.assertEqual(len(self.list_rows()),23)
         self.api.click('search_clear')  # a second clear closes the bar
         self.assertTrue(self.g.widgets['wh3pt_search'].dead)
         self.api.click('favourites_only')
         self.api.click('fav_ward')
         self.assertIn('收藏夹还是空的',self.g.widgets['wh3pt_empty_t1'].text)
         self.api.click('clear_filter')
-        self.assertEqual(len(self.list_rows()),22)
+        self.assertEqual(len(self.list_rows()),23)
         self.api.click('rail_count')
         self.assertIn('正在生效',self.g.widgets['wh3pt_sheet_title'].text)
         self.api.click('sheet_close')
@@ -1184,6 +1184,7 @@ class InGameTests(unittest.TestCase):
         self.assertEqual(self.g.svr.wh3pt_magic_owner, 'player')
         self.assertTrue(self.g.svr.wh3pt_magic_enabled)
         self.assertTrue(self.g.svr.wh3pt_cooldown_enabled)
+        self.assertFalse(self.g.svr.wh3pt_silence_enabled)
         self.assertIsNone(self.g.bundles['wh3pt_battle_magic'])
         self.lua.execute("core:trigger_event('BattleConflictFinished', {})")
         self.assertFalse(self.g.svr.wh3pt_magic_pending)
@@ -1191,6 +1192,28 @@ class InGameTests(unittest.TestCase):
         self.lua.execute("core:trigger_event('BattleBeingFought', {is_autoresolved=function() return false end})")
         self.assertFalse(self.g.svr.wh3pt_magic_enabled)
         self.assertTrue(self.g.svr.wh3pt_cooldown_enabled)
+
+    def test_enemy_silence_is_published_to_the_manual_battle(self):
+        battle = "core:trigger_event('BattleBeingFought', {is_autoresolved=function() return false end})"
+        self.api.apply('battle_silence', True, '1')
+        self.assertIsNone(self.g.bundles['wh3pt_battle_silence'])
+        self.lua.execute(battle)
+        self.assertTrue(self.g.svr.wh3pt_silence_enabled)
+        self.lua.execute("core:trigger_event('BattleConflictFinished', {})")
+        self.api.apply('battle_silence', False, None)
+        self.lua.execute(battle)
+        self.assertFalse(self.g.svr.wh3pt_silence_enabled)
+
+    def test_battle_script_carries_the_summons_of_the_installed_game(self):
+        script = self.files['script\\battle\\mod\\wh3pt_battle.lua'].decode('utf-8')
+        self.assertTrue(script.startswith('local ENEMY_SUMMONS = '))
+        table = self.lua.eval('function(s) return loadstring("return " .. s)() end')(
+            script[len('local ENEMY_SUMMONS = '):script.index('\n')])
+        # A passive raising units when its owner falls, and an army ability's summon.
+        self.assertTrue(table.passives['wh2_dlc11_unit_passive_abandon_ship'])
+        self.assertTrue(table.units['wh2_main_lzd_cav_cold_ones_feral_0'])
+        # A transformation is the caster itself and must never be treated as a summon.
+        self.assertIsNone(table.units['wh2_dlc14_def_cha_malus_darkblade_tzarkan_0'])
 
     def test_perfect_vigour_is_published_to_the_manual_battle(self):
         battle = "core:trigger_event('BattleBeingFought', {is_autoresolved=function() return false end})"
@@ -1696,8 +1719,8 @@ class InGameTests(unittest.TestCase):
         self.api.click('open')
         self.assertIn('查看全部',self.g.widgets['wh3pt_sheet_open'].text)
         self.api.click('sheet_open')
-        self.assertIn('34 项',self.g.widgets['wh3pt_sheet_title'].text)
-        self.assertEqual(len(self.list_rows()),34)
+        self.assertIn('35 项',self.g.widgets['wh3pt_sheet_title'].text)
+        self.assertEqual(len(self.list_rows()),35)
         self.api.click('sheet_close')
         self.assertTrue(self.g.widgets['wh3pt_sheet_title'].dead)
         self.assertFalse(any(r.startswith('sheet_') for r in self.list_rows()))
@@ -1813,7 +1836,7 @@ class InGameTests(unittest.TestCase):
 
     def test_pack_has_no_always_on_handicaps_or_global_cap_and_unique_abilities(self):
         self.assertFalse(any('campaign_difficulty_handicap' in n or '_kv_' in n for n in self.files))
-        self.assertEqual(len(self.report['features']),35)
+        self.assertEqual(len(self.report['features']),36)
         self.assertIn('chainsword',[f['id'] for f in self.report['features']])
         self.assertEqual(self.feature('health').scope,'faction_to_character_own')
         self.assertIn('领主与英雄',self.feature('health').label)

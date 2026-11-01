@@ -12,6 +12,7 @@ class BattleTests(unittest.TestCase):
         self.lua = LuaRuntime(unpack_returned_tuples=True)
         self.lua.execute((ROOT / 'tests/runtime_mock.lua').read_text(encoding='utf-8'))
         self.lua.execute('''
+            ENEMY_SUMMONS={passives={summon_on_death=true},units={skeletons_summoned=true,feral_cold_ones=true}}
             function collection(items)
                 return {count=function() return #items end, item=function(_,i) return items[i] end}
             end
@@ -22,6 +23,7 @@ class BattleTests(unittest.TestCase):
                 function u:fatigue_state() return self.fatigue end
                 function u:set_stat_attribute(key,on) self.attributes[key]=on end
                 function u:unique_ui_id() return self.id end
+                function u:type() return self.key or 'ordinary_unit' end
                 function u:is_player_controlled() return self.player end
                 function u:owned_non_passive_special_abilities() return self.spells or {} end
                 function u:army() return self.owner_army end
@@ -52,6 +54,7 @@ class BattleTests(unittest.TestCase):
                 function a:faction_key() return self.faction or 'player' end
                 function a:unique_id() return self.id end
                 function a:is_player_controlled() return self.player end
+                function a:is_reinforcement_army() return self.reinforcing==true end
                 function a:units() return collection(self.items) end
                 function a:winds_of_magic_current() return self.current end
                 function a:winds_of_magic_reserve() return self.reserve end
@@ -65,10 +68,12 @@ class BattleTests(unittest.TestCase):
                 end
                 function a:create_unit_controller()
                     local uc={resets={},refills={},releases=0,fatigue_calls=0}
-                    function uc:add_units(u) assert(u.player);self.unit=u end
+                    function uc:add_units(u) self.unit=u end
+                    function uc:kill() assert(not self.unit.player,'killed a player unit');self.unit.men=0 end
                     function uc:clear_all() self.unit=nil end
                     function uc:change_fatigue_amount(amount)
                         assert(amount>0 and amount<1)  -- 0 is a divide by zero in the engine
+                        assert(self.unit.player)
                         self.unit.script_control=true
                         self.fatigue_calls=self.fatigue_calls+1
                         if self.unit.reject_fatigue then error('fatigue API failure') end
@@ -78,6 +83,7 @@ class BattleTests(unittest.TestCase):
                         self.unit.fatigue='threshold_fresh'
                     end
                     function uc:reset_ability_cooldown(key)
+                        assert(self.unit.player)
                         self.unit.script_control=true
                         if self.unit.reject_reset then error('cooldown API failure') end
                         self.resets[#self.resets+1]=key
@@ -103,6 +109,7 @@ class BattleTests(unittest.TestCase):
             allied_army=make_army(2,false,{})
             enemy_army=make_army(3,false,{enemy})
             battle_armies={player_army,allied_army}
+            enemy_armies={enemy_army}
             phases, timers, callbacks = {}, {}, {}
             bm={}
             function bm:is_multiplayer() return multiplayer end
@@ -110,6 +117,9 @@ class BattleTests(unittest.TestCase):
             function bm:is_conflict_phase() return conflict~=false end
             function bm:get_player_alliance()
                 return {armies=function() return collection(battle_armies) end}
+            end
+            function bm:get_non_player_alliance()
+                return {armies=function() return collection(enemy_armies) end}
             end
             function bm:callback(fn,delay,name) callbacks[#callbacks+1]=fn end
             function bm:real_callback(fn,delay,name) timers[name]=fn end
@@ -128,6 +138,142 @@ class BattleTests(unittest.TestCase):
         self.g.svr.wh3pt_magic_owner = owner
         self.g.svr.wh3pt_magic_enabled = True
         self.g.svr.wh3pt_cooldown_enabled = True
+
+    def publish_silence(self):
+        self.publish_campaign_magic()
+        self.g.svr.wh3pt_magic_enabled = False
+        self.g.svr.wh3pt_cooldown_enabled = False
+        self.g.svr.wh3pt_silence_enabled = True
+
+    def tick(self):
+        self.g.timers.wh3pt_battle_revival()
+
+    def enemy_with(self, code):
+        return self.lua.execute('''
+            local u=make_unit(50+#enemy_army.items,false)
+            %s
+            u.owner_army=enemy_army
+            enemy_army.items[#enemy_army.items+1]=u
+            return u
+        ''' % code)
+
+    def test_silence_comes_from_the_campaign_and_only_for_the_owner(self):
+        self.publish_silence()
+        self.api.start()
+        self.assertTrue(self.api.silence_state()[0])
+        other = self.module.new(self.g.bm)
+        other.start()
+        self.assertFalse(other.silence_state()[0])
+
+    def test_silence_blocks_enemy_abilities_and_never_the_players_side(self):
+        self.lua.execute('''
+            enemy.spells={'fireball','raise_dead'}
+            own.spells={'fireball'}; ally.spells={'fireball'}; ordinary.spells={'buff'}
+        ''')
+        self.publish_silence()
+        self.api.start()
+        self.tick()
+        self.assertTrue(self.g.enemy.disabled.fireball)
+        self.assertTrue(self.g.enemy.disabled.raise_dead)
+        for unit in (self.g.own, self.g.ally, self.g.ordinary):
+            self.assertIsNone(unit.disabled.fireball)
+            self.assertIsNone(unit.disabled.buff)
+        self.assertEqual(self.api.silence_state(), (True, 2, 0))
+
+    def test_silence_keeps_ordinary_passives_but_blocks_summoning_ones(self):
+        self.lua.execute("enemy.abilities={'aura_of_dread','summon_on_death'}")
+        self.publish_silence()
+        self.api.start()
+        self.tick()
+        self.assertTrue(self.g.enemy.disabled.summon_on_death)
+        self.assertIsNone(self.g.enemy.disabled.aura_of_dread)
+
+    def test_silence_does_not_ask_again_for_a_unit_it_already_covered(self):
+        self.lua.execute('''
+            enemy.spells={'fireball'}; calls=0
+            local native=enemy.disable_special_ability
+            function enemy:disable_special_ability(k,on) calls=calls+1; native(self,k,on) end
+        ''')
+        self.publish_silence()
+        self.api.start()
+        self.tick(); self.tick(); self.tick()
+        self.assertEqual(self.g.calls, 1)
+
+    def test_units_arriving_later_are_silenced_too(self):
+        self.publish_silence()
+        self.api.start()
+        self.tick()
+        late = self.enemy_with("u.spells={'late_spell'}")
+        self.tick()
+        self.assertTrue(late.disabled.late_spell)
+        self.assertGreater(late.men, 0)
+
+    def test_summon_is_removed_on_arrival_but_a_unit_from_the_start_is_not(self):
+        start = self.enemy_with("u.key='feral_cold_ones'")
+        self.publish_silence()
+        self.api.start()
+        self.tick()
+        summon = self.enemy_with("u.key='skeletons_summoned'")
+        normal = self.enemy_with("u.key='ordinary_unit'")
+        self.tick()
+        self.assertEqual(summon.men, 0)
+        self.assertEqual(normal.men, 50)
+        self.assertEqual(start.men, 50)
+        self.assertEqual(self.api.silence_state()[2], 1)
+        self.assertFalse(summon.script_control)
+
+    def test_reinforcement_army_is_not_mistaken_for_a_summon(self):
+        self.publish_silence()
+        self.api.start()
+        self.tick()
+        unit = self.lua.execute('''
+            local u=make_unit(70,false); u.key='feral_cold_ones'; u.spells={'late_spell'}
+            local army=make_army(9,false,{u}); army.reinforcing=true
+            enemy_armies[#enemy_armies+1]=army
+            return u
+        ''')
+        self.tick()
+        self.assertEqual(unit.men, 50)
+        self.assertTrue(unit.disabled.late_spell)
+
+    def test_switching_off_gives_back_only_what_it_took(self):
+        self.lua.execute("enemy.spells={'fireball'}; enemy.disabled.scripted=true")
+        self.publish_silence()
+        self.api.start()
+        self.tick()
+        self.api.action('silence')
+        self.assertEqual(self.api.silence_state(), (False, 0, 0))
+        self.assertFalse(self.g.enemy.disabled.fireball)
+        self.assertTrue(self.g.enemy.disabled.scripted)
+        self.tick()
+        self.assertFalse(self.g.enemy.disabled.fireball)
+
+    def test_switching_on_mid_battle_acts_at_once_and_leaves_what_is_there(self):
+        self.lua.execute("enemy.spells={'fireball'}; enemy.key='skeletons_summoned'")
+        self.api.start()
+        self.assertFalse(self.api.silence_state()[0])
+        self.api.action('silence')
+        self.assertTrue(self.g.enemy.disabled.fireball)
+        self.assertEqual(self.g.enemy.men, 50)
+
+    def test_silence_stops_itself_when_the_engine_refuses(self):
+        self.lua.execute("enemy.spells={'fireball'}; function enemy:disable_special_ability() error('ability API failure') end")
+        self.publish_silence()
+        self.api.start()
+        self.tick()
+        self.assertFalse(self.api.silence_state()[0])
+        self.assertIn('禁止敌方技能已暂停', self.api.status()[0])
+
+    def test_silence_is_off_in_replays_and_multiplayer_and_after_the_battle(self):
+        self.lua.execute("enemy.spells={'fireball'}")
+        self.publish_silence()
+        self.api.start()
+        self.g.replay = True
+        self.tick()
+        self.assertIsNone(self.g.enemy.disabled.fireball)
+        self.g.replay = False
+        self.g.phases.Complete()
+        self.assertFalse(self.api.silence_state()[0])
 
     def test_campaign_magic_inheritance_consumed_once_and_local_override(self):
         self.publish_campaign_magic()
@@ -584,7 +730,7 @@ class BattleTests(unittest.TestCase):
             for widget in (launcher,panel):
                 self.assertLessEqual(widget.x+widget.w,width-bar,(width,widget.id))
                 self.assertGreaterEqual(widget.x,0)
-            for name in ['close','fatigue','mode','revive','heal','ammo','magic','cooldown','status']:
+            for name in ['close','fatigue','mode','revive','heal','ammo','magic','cooldown','silence','status']:
                 widget=self.g.widgets['wh3pt_battle_'+name]
                 self.assertGreaterEqual(widget.x,panel.x,name)
                 self.assertGreaterEqual(widget.y,panel.y,name)
@@ -615,7 +761,7 @@ class BattleTests(unittest.TestCase):
             self.g.text_scale=text;self.g.screen_width=3840;self.g.screen_height=2160
             runtime=self.module.new(self.g.bm)
             runtime.ui()
-            for name in ('open','mode','revive','heal','ammo','magic','cooldown'):
+            for name in ('open','mode','revive','heal','ammo','magic','cooldown','silence'):
                 widget=self.g.widgets['wh3pt_battle_'+name]
                 self.assertLess(self.g.measure_text(widget.text,12),widget.w,(text,name,widget.text))
 

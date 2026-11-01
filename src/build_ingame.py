@@ -443,6 +443,15 @@ def icon_template():
     return ET.tostring(root, encoding='utf-8', xml_declaration=True)
 
 
+def enemy_summons(game):
+    """What the battle script stops on the enemy side. A transformation is the caster itself."""
+    rows = [row for data in read_pack(Path(game) / 'data/db.pack', lambda n: n.startswith('db\\unit_special_abilities_tables\\')).values()
+            for row in decode('unit_special_abilities_tables', data)[1]]
+    summons = [r for r in rows if r['spawned_unit'] and not r['spawn_is_transformation']]
+    return dict(passives={r['key']: True for r in summons if r['passive']},
+                units={r['spawned_unit']: True for r in summons})
+
+
 def ui_files(catalog, strategic=None, game=GAME):
     """Everything in the pack that defines the look of the panel."""
     files = {'script\\campaign\\mod\\wh3pt_panel.lua': (
@@ -459,7 +468,9 @@ def ui_files(catalog, strategic=None, game=GAME):
         + (ROOT / 'ingame/views.lua').read_text(encoding='utf-8') + '\n'
         + (ROOT / 'ingame/panel.lua').read_text(encoding='utf-8')
     ).encode('utf-8')}
-    files['script\\battle\\mod\\wh3pt_battle.lua'] = (ROOT / 'ingame/battle.lua').read_bytes()
+    files['script\\battle\\mod\\wh3pt_battle.lua'] = (
+        'local ENEMY_SUMMONS = ' + lua(enemy_summons(game)) + '\n'
+    ).encode('utf-8') + (ROOT / 'ingame/battle.lua').read_bytes()
     for name, make in UI_IMAGES.items():
         files['ui\\wh3pt\\' + name + '.png'] = make()
     for kind in ['button', 'label', 'card']:
@@ -595,6 +606,9 @@ def build_ingame(game=GAME, addons=None, local_dir=None, workshop=None):
         dict(id='battle_cooldown', label='技能无冷却无限次数', group='特殊', min=1, max=1,
              default=1, step=1, toggle=True, unit='', manual_battle=True, battle_setting='cooldown',
              hint='开战自动启用；玩家全部主动技能与法术'),
+        dict(id='battle_silence', label='禁止敌方技能与召唤', group='特殊', min=1, max=1,
+             default=1, step=1, toggle=True, unit='', manual_battle=True, battle_setting='silence',
+             hint='开战自动启用；只作用于敌方，玩家与盟军不受影响'),
     ])
     bundles = [
         dict(
