@@ -296,6 +296,10 @@ local function create_views(ctx)
             local upgrades = ctx.auto_upgrade()
             local on = upgrades and upgrades.enabled()
             text, state = on and '● 开' or '○ 关', on and 'enabled' or 'active'
+        elseif cmd.id == 'auto_skills' then
+            local skills = ctx.auto_skills()
+            local on = skills and skills.enabled()
+            text, state = on and '● 开' or '○ 关', on and 'enabled' or 'active'
         end
         button(parent, 'cmd_' .. cmd.id, right - 56, ry + 13, 56, 26, text, state):SetDisabled(disabled)
         if cmd.toggle then
@@ -320,11 +324,12 @@ local function create_views(ctx)
     end
 
     local function command_signature(def)
-        local targets, mortarchs, upgrades = ctx.targets(), ctx.mortarchs(), ctx.auto_upgrade()
+        local targets, mortarchs, upgrades, skills = ctx.targets(), ctx.mortarchs(), ctx.auto_upgrade(), ctx.auto_skills()
         return table.concat({tostring(cmd_draft[def.id]), tostring(favourites[def.id]), tostring(M.busy),
             tostring(def.id == 'free_skills' and targets and targets.enabled()),
             tostring(def.id == 'mortarchs' and mortarchs and mortarchs.enabled()),
-            tostring(def.id == 'auto_upgrade' and upgrades and upgrades.enabled())}, '|')
+            tostring(def.id == 'auto_upgrade' and upgrades and upgrades.enabled()),
+            tostring(def.id == 'auto_skills' and skills and skills.enabled())}, '|')
     end
 
     local function feature_signature(def)

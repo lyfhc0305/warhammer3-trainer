@@ -17,6 +17,7 @@ local manual_battle
 local target_actions
 local mortarch_actions
 local auto_upgrade
+local auto_skills
 local income_actions
 local resource_interface
 local COMMANDS = {
@@ -27,6 +28,7 @@ local COMMANDS = {
     {id='xp_all', label='全军将领注入经验', short='全军将领经验', unit='XP', default=10000, step=5000, max=500000, integer=true, btn='注入', hint='为在役将领加经验'},
     {id='unit_rank', label='全军兵牌等级', short='全军兵牌等级', unit='级', default=9, step=1, max=9, integer=true, btn='设置', hint='含精英，排除领主/英雄'},
     {id='free_skills', label='免技能点学习', short='免技能点学习', unit='', default=1, step=1, max=1, integer=true, toggle=true, btn='开关', hint='原生技能图标上右键学习'},
+    {id='auto_skills', label='自动加点', short='自动加点', unit='', default=1, step=1, max=1, integer=true, toggle=true, btn='开关', hint='回合开始和升级时自动加点，多选一技能留给你'},
     {id='mortarchs', label='死亡统帅无条件收服', short='死亡统帅无条件收服', unit='', default=1, step=1, max=1, integer=true, toggle=true, btn='开关', hint='免前置和费用，原生页面收服'},
     {id='mortarch_buildings', label='收服关联建筑解锁', short='收服关联建筑解锁', unit='', default=1, step=1, max=1, integer=true, toggle=true, btn='解锁', hint='莱弥亚/血骑士，仍需正常建造'},
     {id='auto_upgrade', label='建筑自动升级', short='建筑自动升级', unit='', default=1, step=1, max=1, integer=true, toggle=true, btn='开关', hint='唯一升级选项且资源足够时，回合开始自动升级'},
@@ -57,8 +59,8 @@ local PAGES = {
     }},
     {name='军队', title='军队与将领', sections={
         {'行军', 'move_all', 'move_selected', 'movement', 'attrition'},
-        {'招募与补员', 'recruitment', 'foreign_replenishment', 'replenishment_cap', 'unit_rank'},
-        {'将领与英雄', 'xp_selected', 'xp_all', 'free_skills', 'agent_player'},
+        {'招募与补员', 'recruitment', 'recruit_time', 'foreign_replenishment', 'replenishment_cap', 'unit_rank'},
+        {'将领与英雄', 'xp_selected', 'xp_all', 'free_skills', 'auto_skills', 'agent_player'},
         {'阵营专属', 'mortarchs', 'mortarch_buildings'},
     }},
     {name='战斗', title='手动战斗加成', sections={
@@ -130,16 +132,23 @@ local function read_model(def)
     for i = 0, list:num_items() - 1 do
         local bundle = list:item_at(i)
         if bundle:key() == PREFIX .. def.id then
-            local effects = bundle:effects()
+            local effects, values = bundle:effects(), {}
             for j = 0, effects:num_items() - 1 do
                 local e = effects:item_at(j)
-                if e:scope() == def.scope then
-                    if def.effects then
-                        for index, key in ipairs(def.effects) do
-                            if e:key() == key and math.abs(e:value() - 1) < 0.001 then return true, index end
-                        end
-                    elseif e:key() == def.effect then return true, e:value() / def.sign end
+                values[e:key() .. '|' .. e:scope()] = e:value()
+            end
+            if def.effects then
+                for index, key in ipairs(def.effects) do
+                    local value = values[key .. '|' .. def.scope]
+                    if value and math.abs(value - 1) < 0.001 then return true, index end
                 end
+            else
+                local value = values[def.effect .. '|' .. def.scope]
+                -- A feature made of several effects counts only when every one carries the value.
+                for _, extra in ipairs(def.also or {}) do
+                    if value and values[extra.effect .. '|' .. extra.scope] ~= value then value = nil end
+                end
+                if value then return true, value / def.sign end
             end
             error(def.label .. '：已存在效果包，但数据无法识别')
         end
@@ -205,31 +214,36 @@ local function guarded(fn)
     return ok
 end
 
--- Elite recruitment has crashed the game inside the engine, where neither guarded nor
--- lua_mod_log.txt sees it. Each step leaves one line in its own file, closed right away,
--- so after a crash the last line names the step that was running.
-local ELITE_TRACE = {file = 'wh3pt_elite.log', limit = 2 * 1024 * 1024, checked = false}
-local function elite_trace(step, ...)
-    local fields, n = {...}, select('#', ...)
-    pcall(function()
-        local parts = {os.date('%Y-%m-%d %H:%M:%S'), string.format('%.3f', os.clock()), step}
-        for i = 1, n do parts[#parts + 1] = tostring(fields[i]) end
-        local how = 'a'
-        if not ELITE_TRACE.checked then
-            ELITE_TRACE.checked = true
-            local old = io.open(ELITE_TRACE.file, 'r')
-            if old then
-                if old:seek('end') > ELITE_TRACE.limit then how = 'w' end
-                old:close()
+-- A battle empties lua_mod_log.txt and an engine crash takes it along, so features that
+-- must be diagnosed afterwards keep their own file in the game folder: one line per
+-- step, closed right away. A file past its limit is started over.
+local function file_journal(name, limit)
+    local checked = false
+    return function(step, ...)
+        local fields, n = {...}, select('#', ...)
+        pcall(function()
+            local parts = {os.date('%Y-%m-%d %H:%M:%S'), string.format('%.3f', os.clock()), step}
+            for i = 1, n do parts[#parts + 1] = tostring(fields[i]) end
+            local how = 'a'
+            if not checked then
+                checked = true
+                local old = io.open(name, 'r')
+                if old then
+                    if old:seek('end') > limit then how = 'w' end
+                    old:close()
+                end
             end
-        end
-        local file = io.open(ELITE_TRACE.file, how)
-        if file then
-            file:write(table.concat(parts, '\t') .. '\n')
-            file:close()
-        end
-    end)
+            local file = io.open(name, how)
+            if file then
+                file:write(table.concat(parts, '\t') .. '\n')
+                file:close()
+            end
+        end)
+    end
 end
+-- Elite recruitment has crashed the game inside the engine, where neither guarded nor
+-- lua_mod_log.txt sees it; the last line names the step that was running.
+local elite_trace = file_journal('wh3pt_elite.log', 2 * 1024 * 1024)
 
 local function apply_model_bundle(f, def, value)
     cm:remove_effect_bundle(PREFIX .. def.id, faction_name)
@@ -237,6 +251,9 @@ local function apply_model_bundle(f, def, value)
     if not b or b:is_null_interface() then error('缺少内置效果定义：' .. def.id) end
     local key, amount = effect_spec(def, value)
     if not b:add_effect(key, def.scope, amount) then error('游戏拒绝此效果：' .. key) end
+    for _, extra in ipairs(def.also or {}) do
+        if not b:add_effect(extra.effect, extra.scope, amount) then error('游戏拒绝此效果：' .. extra.effect) end
+    end
     b:set_duration(0)
     cm:apply_custom_effect_bundle_to_faction(b, f)
 end
@@ -380,6 +397,7 @@ local function clear_all()
     if target_actions then target_actions.toggle(false) end
     if mortarch_actions then mortarch_actions.toggle(false) end
     if auto_upgrade then auto_upgrade.toggle(false) end
+    if auto_skills then auto_skills.toggle(false) end
     for _, def in ipairs(CATALOG) do disable_feature(def) end
     M.busy = true
     player_callback(function()
@@ -776,6 +794,8 @@ local function run_command_action(id, raw)
         mortarch_actions.unlock_buildings()
     elseif id == 'auto_upgrade' then
         auto_upgrade.toggle()
+    elseif id == 'auto_skills' then
+        auto_skills.toggle()
     elseif id == 'free_skills' then
         target_actions.toggle()
     elseif id == 'unit_rank' then
@@ -822,7 +842,8 @@ local function snapshot()
     local snap = {features = {}, native = M.native_enabled,
         free_skills = target_actions and target_actions.enabled() or false,
         mortarchs = mortarch_actions and mortarch_actions.enabled() or false,
-        auto_upgrade = auto_upgrade and auto_upgrade.enabled() or false}
+        auto_upgrade = auto_upgrade and auto_upgrade.enabled() or false,
+        auto_skills = auto_skills and auto_skills.enabled() or false}
     for _, def in ipairs(CATALOG) do
         local ok, active, actual = pcall(read, def)
         if ok and active then snap.features[def.id] = actual end
@@ -861,6 +882,7 @@ local function restore(snap, title)
         mortarch_actions.toggle(snap.mortarchs)
     end
     if auto_upgrade and snap.auto_upgrade ~= auto_upgrade.enabled() then auto_upgrade.toggle(snap.auto_upgrade) end
+    if auto_skills and snap.auto_skills ~= auto_skills.enabled() then auto_skills.toggle(snap.auto_skills) end
     M.busy = true
     note_wait('正在撤销' .. title .. '……')
     when_settled(function()
@@ -897,7 +919,8 @@ views = create_views({
     set_resource = set_resource, native_toggle = function(enabled) set_native_recruitment(enabled) end,
     native_select = select_native_regiment, elite_tabs = function() return elite_tabs end,
     arrange_native_cards = arrange_native_cards, targets = function() return target_actions end,
-    mortarchs = function() return mortarch_actions end, auto_upgrade = function() return auto_upgrade end, income = income_actions,
+    mortarchs = function() return mortarch_actions end, auto_upgrade = function() return auto_upgrade end,
+    auto_skills = function() return auto_skills end, income = income_actions,
     resource_interface = function(def) return resource_interface(def) end,
     regiment_belongs = regiment_belongs_to_faction, strategic_name = strategic_name,
     collect_characters = collect_characters, setting = setting, validate = validate,
@@ -918,6 +941,7 @@ reset_player_context = function()
     income_actions.migrate()
     if target_actions then target_actions.reset() end
     if auto_upgrade then auto_upgrade.reset() end
+    if auto_skills then auto_skills.reset() end
     M.selected_cqi, M.busy, native_pending = nil, false, false
     native_revision = native_revision + 1
     for _, def in ipairs(CATALOG) do
@@ -953,8 +977,10 @@ local function start()
         character=function() return M.selected_cqi and cm:get_character_by_cqi(M.selected_cqi) or nil end,
         callback=player_callback, guard=guarded, render=function() views.refresh() end})
     mortarch_actions = create_mortarch_actions({faction=faction, message=message, callback=player_callback, guard=guarded})
-    auto_upgrade = create_auto_upgrade({faction=faction, setting=setting, message=message,
+    auto_upgrade = create_auto_upgrade({faction=faction, setting=setting, message=message, journal=file_journal,
         callback=player_callback, guard=guarded, render=function() views.refresh() end})
+    auto_skills = create_auto_skills({faction=faction, setting=setting, message=message, data=SKILL_DATA,
+        journal=file_journal, callback=player_callback, guard=guarded, render=function() views.refresh() end})
     core:remove_listener('wh3pt_unit_card_select')
     core:remove_listener('wh3pt_free_skill_click')
     core:add_listener('wh3pt_free_skill_click', 'ComponentRClickUp', true, function(c)
@@ -1058,7 +1084,7 @@ cm:add_first_tick_callback(function() guarded(start) end)
 return {
     manual=manual_battle, income=income_actions, read_model=read_model,
     targets=function() return target_actions end, auto_upgrade=function() return auto_upgrade end,
-    start=start, read=read, apply=apply, clear=clear_all, validate=validate,
+    auto_skills=function() return auto_skills end, start=start, read=read, apply=apply, clear=clear_all, validate=validate,
     strategic=STRATEGIC, set_resource=set_resource, native_toggle=set_native_recruitment,
     native_select=select_native_regiment, native_sync=schedule_native_sync, native_filter=arrange_native_cards,
     elite_tabs=function() return elite_tabs end,

@@ -253,6 +253,7 @@ class GameDataTests(unittest.TestCase):
         from build_ingame import build_ingame
         from income_data import SOURCE_TABLES as income
         from strategic_data import SOURCE_TABLES as strategic
+        from skill_data import SOURCE_TABLES as skills
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / PACK_NAME
             path.write_bytes(build_ingame()[0])
@@ -261,7 +262,7 @@ class GameDataTests(unittest.TestCase):
         self.assertEqual(status.state, 'current')
         self.assertEqual(status.manifest['trainer_version'], trainer_core.VERSION)
         self.assertEqual(manifest_addons(status.manifest), {'enabled': [], 'values': {}})
-        self.assertTrue((income | strategic) <= set(status.manifest['tables']))
+        self.assertTrue((income | strategic | skills) <= set(status.manifest['tables']))
         head = next(iter(script.values())).decode('utf-8').split('\n', 1)[0]
         self.assertIn('["trainer"]="' + trainer_core.VERSION + '"', head)
 

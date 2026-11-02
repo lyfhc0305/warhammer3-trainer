@@ -16,6 +16,7 @@ from game_compat import MANIFEST, addon_record, game_version, make_manifest, man
 from general_data import FLAGS as GENERAL_FLAGS, USES as GENERAL_USES, general_data
 from pack_io import read_pack, write_pack
 from shop_addon import SHOP_FILENAME
+from skill_data import SOURCE_TABLES as SKILL_TABLES, skill_data
 from ballistic_addon import BALLISTIC_FILENAME
 from ui_engine import FONT_SIZES, on_screen
 
@@ -435,6 +436,14 @@ def general_tables(game):
         return {'flags': GENERAL_FLAGS, 'uses': list(GENERAL_USES), 'units': {}, 'abilities': {}}
 
 
+def skill_tables(game):
+    """Unreadable skill trees cost auto-allocation its sense of choices, never the Pack."""
+    try:
+        return skill_data(game)
+    except Exception:
+        return {'complete': False, 'exclusive': {}, 'useless': {}}
+
+
 # Modules that stop shots hurting friends: the commander's shooters start out relying on that.
 FRIENDLY_FIRE_ADDONS = {'ballistic', 'friendly_fire'}
 
@@ -445,10 +454,12 @@ def ui_files(catalog, strategic=None, game=GAME, friendly_fire_off=False):
         'local CATALOG = ' + lua(catalog) + '; local STRATEGIC = '
         + lua(dict(strategic or {'resources': [], 'units': []}, build={'trainer': VERSION, 'game': game_version(game) or ''})) + '\n'
         + 'local UI_FONTS = ' + lua(ui_font_table()) + '\n'
+        + 'local SKILL_DATA = ' + lua(skill_tables(game)) + '\n'
         + (ROOT / 'ingame/manual_battle.lua').read_text(encoding='utf-8') + '\n'
         + (ROOT / 'ingame/target_actions.lua').read_text(encoding='utf-8') + '\n'
         + (ROOT / 'ingame/mortarchs.lua').read_text(encoding='utf-8') + '\n'
         + (ROOT / 'ingame/auto_upgrade.lua').read_text(encoding='utf-8') + '\n'
+        + (ROOT / 'ingame/auto_skills.lua').read_text(encoding='utf-8') + '\n'
         + (ROOT / 'ingame/income.lua').read_text(encoding='utf-8') + '\n'
         + (ROOT / 'ingame/elite_tabs.lua').read_text(encoding='utf-8') + '\n'
         + (ROOT / 'ingame/kit.lua').read_text(encoding='utf-8') + '\n'
@@ -540,6 +551,17 @@ def build_ingame(game=GAME, addons=None, local_dir=None, workshop=None):
             default=abs(row['effect_value']), step=10,
             sign=-1 if row['effect_value'] < 0 else 1, unit=unit,
         ))
+    # Recruitment time is three bonus values: local recruitment in a province, global
+    # recruitment, and armies that recruit in their own camp. Each effect is the all-units
+    # one the game's technologies and buildings use, at the scope they use it.
+    catalog.append(dict(
+        id='recruit_time', label='招募加速', effect='wh2_main_effect_faction_trait_unit_recruitment_duration_all',
+        scope='faction_to_province_own', group='战役', max=10, default=10, step=1, integer=True,
+        sign=-1, unit='回合', hint='本地、全局和营地招募都减少', also=[
+            dict(effect='wh_dlc05_effect_global_recruitment_duration_all', scope='faction_to_faction_own'),
+            dict(effect='wh3_dlc25_effect_local_recruitment_duration', scope='faction_to_force_own'),
+        ],
+    ))
     # Independent ability variants: enabling ammo must not implicitly heal or resurrect.
     ability_tables = {}
     variants = [('healing', [1, 5, 12.5, 25]), ('revive', [1, 5, 12.5, 25]), ('ammo', [5, 20, 50, 100])]
@@ -675,7 +697,7 @@ def build_ingame(game=GAME, addons=None, local_dir=None, workshop=None):
     files['wh3_personal_trainer_marker.txt'] = b'WH3-PERSONAL-TRAINER-v1'
     files['wh3pt_mode.txt'] = b'ingame-v2'
     shipped = {n.split('\\')[1] for n in files if n.startswith('db\\')}
-    files[MANIFEST] = make_manifest(game, shipped | STRATEGIC_TABLES | INCOME_TABLES, VERSION,
+    files[MANIFEST] = make_manifest(game, shipped | STRATEGIC_TABLES | INCOME_TABLES | SKILL_TABLES, VERSION,
                                     addon_record(enabled_addons, addon_values))
     payload = write_pack(files)
     report = dict(

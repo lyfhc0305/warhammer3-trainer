@@ -11,7 +11,7 @@ from tests import SRC
 # that this table does not know is an error, so a misspelt path cannot pass as "false".
 HARNESS = r'''
 player='player'; players_turn=true; saved={}; queue={}; messages={}; notices={}; logs={}
-listeners={}; commands={}; pending={}; settlements={}; order={}; caps={}
+listeners={}; commands={}; pending={}; settlements={}; order={}; caps={}; queued_on={}; journal={}
 treasury=1000; resources=100; renders=0; last_error=false; reject_commands=false; broken_read=false
 function out(s) logs[#logs+1]=s end
 ModLog=out
@@ -28,9 +28,16 @@ function slot(target,extra)
     for k,v in pairs(extra or {}) do s[k]=v end
     return s
 end
+-- The script side of a slot: the building standing in it, read when asked.
+local function script_slot(s)
+    return {s=s, is_null_interface=function() return false end, has_building=function() return true end,
+        building=function() return {name=function() return s.script_built or s.built end} end}
+end
 function place(cqi,slots,extra)
-    local p={owned=true,siege=false,abandoning=false,slots=slots}
+    local p={owned=true,siege=false,abandoning=false,slots=slots,script={}}
     for k,v in pairs(extra or {}) do p[k]=v end
+    for i,index in ipairs(p.script_order or {}) do p.script[i]=script_slot(slots[index]) end
+    if not p.script_order then for i,s in ipairs(slots) do p.script[i]=script_slot(s) end end
     settlements[cqi]=p; order[#order+1]=cqi
 end
 local function read_level(s,option,fn,path)
@@ -75,20 +82,22 @@ function common.get_context_value(kind,cqi,e)
     assert(type(value)=='boolean','unknown slot function: '..rest)
     return value
 end
-function common.call_context_command(kind,cqi,e)
-    assert(kind=='CcoCampaignSettlement')
-    local index=assert(e:match('^BuildingSlotList%.At%((%d+)%)%.UpgradeToFirstAvailableOption$'),'unknown command: '..e)
-    local s=settlements[cqi].slots[tonumber(index)+1]
-    commands[#commands+1]=s.target
-    if not reject_commands then pending[#pending+1]=s end
-end
+-- The outpost-only context command must never come back.
+function common.call_context_command(kind,cqi,e) error('context command used: '..e) end
 f={name=function() return player end,treasury=function() return treasury end}
 function f:region_list()
     local items={}
-    for _,cqi in ipairs(order) do items[#items+1]={cqi=function() return cqi end} end
+    for _,cqi in ipairs(order) do
+        items[#items+1]={cqi=function() return cqi end, slot_list=function() return list(settlements[cqi].script) end}
+    end
     return list(items)
 end
 cm={}
+function cm:add_building_to_settlement_queue(slot,key)
+    assert(key==slot.s.target,'queued '..key..' on the slot of '..slot.s.target)
+    commands[#commands+1]=key; queued_on[#queued_on+1]=slot.building():name()
+    if not reject_commands then pending[#pending+1]=slot.s end
+end
 function cm:get_saved_value(k) return saved[k] end
 function cm:set_saved_value(k,v) saved[k]=v end
 function cm:is_local_players_turn(force) assert(force==true); return players_turn end
@@ -105,7 +114,8 @@ env={faction=function() return f end,
     message=function(s,e) messages[#messages+1]=s; last_error=e==true end,
     callback=function(fn) queue[#queue+1]=fn end,
     guard=function(fn) local ok,err=pcall(fn); if not ok then notices[#notices+1]=tostring(err) end; return ok end,
-    render=function() renders=renders+1 end}
+    render=function() renders=renders+1 end,
+    journal=function(name,limit) journal_name=name; return function(text) journal[#journal+1]=text end end}
 -- The game applies a command between ticks: it is paid for and starts only then.
 function flush()
     local due=pending; pending={}
@@ -227,9 +237,41 @@ class AutoUpgradeTests(unittest.TestCase):
         self.g.reject_commands = True
         self.run_check()
         self.assertEqual(self.commands(), ['a_2', 'b_2'])
-        self.assertEqual(self.messages()[-1], '建筑自动升级：已开始 0 项；2 项未生效，详见 mod 日志')
+        self.assertEqual(self.messages()[-1], '建筑自动升级：已开始 0 项；2 项未生效，详见 wh3pt_upgrade.log')
         self.assertTrue(self.g.last_error)
         self.assertIn('a_2', list(self.g.logs.values())[0])
+
+    def test_the_queue_gets_the_slot_holding_the_building(self):
+        self.place("place(1,{slot('a_2',{built='a_1'}),slot('b_2',{built='b_1'})},{script_order={2,1}})")
+        self.run_check()
+        self.assertEqual(self.commands(), ['a_2', 'b_2'])
+        self.assertEqual(list(self.g.queued_on.values()), ['a_1', 'b_1'])
+        self.assertEqual(self.messages()[-1], '建筑自动升级：已开始 2 项，花费 200 金')
+
+    def test_no_script_slot_with_that_building_is_a_visible_failure(self):
+        self.place("place(1,{slot('a_2',{built='a_1',script_built='mill_1'}),slot('b_2',{built='b_1'})})")
+        self.run_check()
+        self.assertEqual(self.commands(), ['b_2'])
+        self.assertEqual(self.messages()[-1], '建筑自动升级：已开始 1 项，花费 100 金；1 项未生效，详见 wh3pt_upgrade.log')
+        self.assertTrue(self.g.last_error)
+
+    def test_a_queue_that_throws_counts_as_failed_and_the_next_still_runs(self):
+        self.place("place(1,{slot('a_2'),slot('b_2')})")
+        self.lua.execute("local queue_one=cm.add_building_to_settlement_queue; function cm:add_building_to_settlement_queue(slot,key)"
+                         " if key=='a_2' then error('refused') end; return queue_one(self,slot,key) end")
+        self.run_check()
+        self.assertEqual(self.commands(), ['b_2'])
+        self.assertTrue(any('queue refused a_2' in line for line in self.g.journal.values()))
+
+    def test_every_run_and_every_wait_is_written_down(self):
+        self.place("place(1,{slot('a_2',{cost=300}),slot('b_2',{cost=5000})}); place(2,{slot('c_2')},{owned=false})")
+        self.run_check()
+        lines = list(self.g.journal.values())
+        self.assertEqual(self.g.journal_name, 'wh3pt_upgrade.log')
+        self.assertIn('waits: b_2 in 1 BuildingSlotList.At(1), CanAfford(this)', lines)
+        self.assertIn('started: a_2 in 1 BuildingSlotList.At(0)', lines)
+        self.assertEqual(lines[-1], 'run: 1 of 2 settlements open, 2 slots free, 2 single upgrades; '
+                                    'started 1, waiting 1, failed 0, spent 300')
 
     def test_slow_command_is_given_time_before_it_counts_as_failed(self):
         self.place("place(1,{slot('a_2'),slot('b_2')})")

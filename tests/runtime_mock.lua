@@ -171,6 +171,7 @@ end
 local function make_char(cqi,wounded,garrison)
     local ch={}
     function ch:cqi() return cqi end
+    function ch:character_subtype_key() return 'wh_main_emp_lord' end
     function ch:is_null_interface() return false end
     function ch:is_wounded() return wounded or false end
     function ch:faction() return f end
@@ -207,6 +208,9 @@ real_queue={}
 function cm:real_callback(fn,interval,name) assert(type(interval)=='number' and interval>=0); real_queue[#real_queue+1]={fn=fn,ms=interval,name=name} end
 function flush_real() local q=real_queue; real_queue={}; for _,item in ipairs(q) do item.fn() end end
 function cm:char_lookup_str(cqi) return 'character_cqi:' .. tostring(cqi) end
+function cm:get_character_by_cqi(cqi)
+    for _, ch in ipairs(characters) do if ch:cqi() == cqi then return ch end end
+end
 function cm:treasury_mod(name,amount)
     assert(name=='player')
     treasury_balance = treasury_balance + amount

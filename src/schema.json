@@ -2058,6 +2058,156 @@
       }
     ]
   },
+  "character_skill_node_set_items_tables": {
+    "0": [
+      {
+        "name": "set",
+        "type": "StringU8",
+        "default": null
+      },
+      {
+        "name": "item",
+        "type": "StringU8",
+        "default": null
+      },
+      {
+        "name": "mod_disabled",
+        "type": "Boolean",
+        "default": "false"
+      }
+    ]
+  },
+  "character_skill_node_sets_tables": {
+    "0": [
+      {
+        "name": "agent_key",
+        "type": "OptionalStringU8",
+        "default": null
+      },
+      {
+        "name": "campaign_key",
+        "type": "OptionalStringU8",
+        "default": null
+      },
+      {
+        "name": "faction_key",
+        "type": "OptionalStringU8",
+        "default": null
+      },
+      {
+        "name": "key",
+        "type": "StringU8",
+        "default": null
+      },
+      {
+        "name": "subculture",
+        "type": "OptionalStringU8",
+        "default": null
+      },
+      {
+        "name": "unknown_a",
+        "type": "OptionalStringU8",
+        "default": null
+      },
+      {
+        "name": "unknown_b",
+        "type": "OptionalStringU8",
+        "default": null
+      },
+      {
+        "name": "agent_subtype_key",
+        "type": "OptionalStringU8",
+        "default": null
+      }
+    ]
+  },
+  "character_skill_nodes_skill_locks_tables": {
+    "0": [
+      {
+        "name": "character_skill",
+        "type": "StringU8",
+        "default": null
+      },
+      {
+        "name": "character_skill_node",
+        "type": "StringU8",
+        "default": null
+      },
+      {
+        "name": "level",
+        "type": "I32",
+        "default": "1"
+      }
+    ]
+  },
+  "character_skill_nodes_tables": {
+    "6": [
+      {
+        "name": "campaign_key",
+        "type": "OptionalStringU8",
+        "default": null
+      },
+      {
+        "name": "character_skill_key",
+        "type": "StringU8",
+        "default": null
+      },
+      {
+        "name": "faction_key",
+        "type": "OptionalStringU8",
+        "default": null
+      },
+      {
+        "name": "tier",
+        "type": "I32",
+        "default": "0"
+      },
+      {
+        "name": "key",
+        "type": "StringU8",
+        "default": null
+      },
+      {
+        "name": "indent",
+        "type": "I32",
+        "default": "0"
+      },
+      {
+        "name": "subculture",
+        "type": "OptionalStringU8",
+        "default": null
+      },
+      {
+        "name": "points_on_creation",
+        "type": "I32",
+        "default": "0"
+      },
+      {
+        "name": "required_num_parents",
+        "type": "I32",
+        "default": "0"
+      },
+      {
+        "name": "visible_in_ui",
+        "type": "Boolean",
+        "default": "true"
+      }
+    ]
+  },
+  "character_skill_utilization_hints_junctions_tables": {
+    "0": [
+      {
+        "name": "hint",
+        "type": "StringU8",
+        "default": null
+      },
+      {
+        "name": "character_skill",
+        "type": "StringU8",
+        "default": null
+      }
+    ]
+  },
   "effect_bonus_value_basic_junction_tables": {
     "0": [
       {

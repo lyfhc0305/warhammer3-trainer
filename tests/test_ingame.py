@@ -917,7 +917,7 @@ class InGameTests(unittest.TestCase):
                 self.api.apply(defn.id,True,str(defn.default)); self.drain_income()
                 self.assertEqual(self.api.read(defn),(True,defn.default))
                 if not defn.toggle:
-                    value=1 if defn.choices else 17
+                    value=1 if defn.choices else 17 if defn.max>=17 else defn.max-1
                     self.api.apply(defn.id,True,str(value)); self.drain_income()
                     self.assertEqual(self.api.read(defn),(True,value))
                 self.api.apply(defn.id,False,'invalid ignored'); self.g.flush()
@@ -1203,11 +1203,43 @@ class InGameTests(unittest.TestCase):
         self.assertTrue(self.api.auto_upgrade().enabled())
         self.assertTrue(self.g.saved['wh3pt_player_auto_upgrade_enabled'])
         self.assertEqual(self.g.widgets['wh3pt_cmd_auto_upgrade'].text, '● 开')
+        self.assertIn('\trun: 0 of 0 settlements open', self.g.written_files['wh3pt_upgrade.log'])
         snap = self.api.snapshot()
         self.api.clear(); self.g.flush()
         self.assertFalse(self.api.auto_upgrade().enabled())
         self.api.restore(snap, '测试'); self.g.flush()
         self.assertTrue(self.api.auto_upgrade().enabled())
+
+    def test_auto_skills_switch_is_saved_cleared_and_undone(self):
+        self.api.click('tab_军队')
+        self.assertEqual(self.g.widgets['wh3pt_cmd_auto_skills'].text, '○ 关')
+        self.api.click('cmd_auto_skills')
+        self.assertTrue(self.api.auto_skills().enabled())
+        self.assertTrue(self.g.saved['wh3pt_player_auto_skills_enabled'])
+        self.assertEqual(self.g.widgets['wh3pt_cmd_auto_skills'].text, '● 开')
+        self.assertIn('\trun: 4 characters;', self.g.written_files['wh3pt_skills.log'])
+        snap = self.api.snapshot()
+        self.api.clear(); self.g.flush()
+        self.assertFalse(self.api.auto_skills().enabled())
+        self.api.restore(snap, '测试'); self.g.flush()
+        self.assertTrue(self.api.auto_skills().enabled())
+
+    def test_recruit_time_cuts_local_global_and_camp_recruitment(self):
+        self.api.apply('recruit_time', True, '3'); self.g.flush()
+        entries = {(e.key(), e.scope()): e.value() for e in self.g.bundles['wh3pt_recruit_time'].entries.values()}
+        self.assertEqual(entries, {
+            ('wh2_main_effect_faction_trait_unit_recruitment_duration_all', 'faction_to_province_own'): -3,
+            ('wh_dlc05_effect_global_recruitment_duration_all', 'faction_to_faction_own'): -3,
+            ('wh3_dlc25_effect_local_recruitment_duration', 'faction_to_force_own'): -3,
+        })
+        self.assertEqual(self.api.read(self.feature('recruit_time')), (True, 3))
+        known = {r['effect'] for n, d in read_pack(Path(GAME) / 'data/db.pack', lambda n: n.startswith('db\\effects_tables\\')).items()
+                 for r in decode('effects_tables', d)[1]}
+        self.assertLessEqual({key for key, _ in entries}, known)
+        # A bundle missing one of its effects is not passed off as working.
+        self.g.bundles['wh3pt_recruit_time'].entries[3] = None
+        with self.assertRaisesRegex(Exception, '无法识别'):
+            self.api.read(self.feature('recruit_time'))
 
     def test_mortarch_building_command_is_player_scoped_and_dispatches_native_unlock(self):
         self.api.click('tab_军队')
@@ -1877,8 +1909,8 @@ class InGameTests(unittest.TestCase):
         self.api.click('open')
         self.assertIn('查看全部',self.g.widgets['wh3pt_sheet_open'].text)
         self.api.click('sheet_open')
-        self.assertIn('36 项',self.g.widgets['wh3pt_sheet_count'].text)
-        self.assertEqual(len(self.list_rows()),36)
+        self.assertIn('37 项',self.g.widgets['wh3pt_sheet_count'].text)
+        self.assertEqual(len(self.list_rows()),37)
         self.api.click('sheet_close')
         self.assertTrue(self.g.widgets['wh3pt_sheet_count'].dead)
         self.assertFalse(any(r.startswith('sheet_') for r in self.list_rows()))
@@ -1994,7 +2026,7 @@ class InGameTests(unittest.TestCase):
 
     def test_pack_has_no_always_on_handicaps_or_global_cap_and_unique_abilities(self):
         self.assertFalse(any('campaign_difficulty_handicap' in n or '_kv_' in n for n in self.files))
-        self.assertEqual(len(self.report['features']),37)
+        self.assertEqual(len(self.report['features']),38)
         self.assertIn('chainsword',[f['id'] for f in self.report['features']])
         self.assertEqual(self.feature('health').scope,'faction_to_character_own')
         self.assertIn('领主与英雄',self.feature('health').label)
