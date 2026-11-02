@@ -124,6 +124,18 @@ class InGameTests(unittest.TestCase):
         self.g.multiplayer=True
         with self.assertRaises(Exception): self.api.native_toggle(True)
 
+    def test_native_select_leaves_a_step_trail_for_engine_crashes(self):
+        self.strategic_fixture()
+        index=next(i for i,d in self.api.strategic.units.items() if '_tmb_' in d.id)
+        unit=self.api.strategic.units[index]
+        self.api.native_select(index); self.native_flush()
+        steps=[line.split('\t')[2] for line in self.g.written_files['wh3pt_elite.log'].splitlines()]
+        self.assertEqual(steps[:2],['click','schedule'])
+        for step in ('sync: read pool','sync: pool add','sync: pool add done','sync: done','verify: done','arrange: find display','render: done'):
+            self.assertIn(step,steps)
+        self.assertLess(steps.index('sync: pool add'),steps.index('sync: done'))
+        self.assertIn(unit.native_key,self.g.written_files['wh3pt_elite.log'])
+
     def test_ror_cap_requires_real_bundle_definition_and_effect_readback(self):
         self.strategic_fixture()
         self.assertTrue(self.g.known_bundle_keys['wh3pt_native_ror'])

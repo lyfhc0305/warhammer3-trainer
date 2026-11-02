@@ -9,6 +9,13 @@ function string.find(s, needle, start, ...)
     assert(select('#', ...) == 0, 'native string.find only accepts three arguments')
     return string.find_lua(s, needle, start, true)
 end
+-- Files the scripts write land in memory, never in the working directory.
+written_files = {}
+io = {open = function(name, how)
+    if how == 'r' then return nil end
+    if how == 'w' or not written_files[name] then written_files[name] = '' end
+    return {write = function(_, text) written_files[name] = written_files[name] .. text end, close = function() end}
+end}
 widgets, queue, saved, bundles, logs, stale_ui_calls = {}, {}, {}, {}, {}, {}
 multiplayer, fail_read, ignore_apply, ignore_remove = false, false, false, false
 screen_width, screen_height = 1920, 1080

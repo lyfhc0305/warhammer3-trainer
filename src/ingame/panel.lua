@@ -205,6 +205,32 @@ local function guarded(fn)
     return ok
 end
 
+-- Elite recruitment has crashed the game inside the engine, where neither guarded nor
+-- lua_mod_log.txt sees it. Each step leaves one line in its own file, closed right away,
+-- so after a crash the last line names the step that was running.
+local ELITE_TRACE = {file = 'wh3pt_elite.log', limit = 2 * 1024 * 1024, checked = false}
+local function elite_trace(step, ...)
+    local fields, n = {...}, select('#', ...)
+    pcall(function()
+        local parts = {os.date('%Y-%m-%d %H:%M:%S'), string.format('%.3f', os.clock()), step}
+        for i = 1, n do parts[#parts + 1] = tostring(fields[i]) end
+        local how = 'a'
+        if not ELITE_TRACE.checked then
+            ELITE_TRACE.checked = true
+            local old = io.open(ELITE_TRACE.file, 'r')
+            if old then
+                if old:seek('end') > ELITE_TRACE.limit then how = 'w' end
+                old:close()
+            end
+        end
+        local file = io.open(ELITE_TRACE.file, how)
+        if file then
+            file:write(table.concat(parts, '\t') .. '\n')
+            file:close()
+        end
+    end)
+end
+
 local function apply_model_bundle(f, def, value)
     cm:remove_effect_bundle(PREFIX .. def.id, faction_name)
     local b = cm:create_new_custom_effect_bundle(PREFIX .. def.id)
@@ -543,6 +569,7 @@ local function native_wanted(def)
     return M.native_enabled and (regiment_belongs_to_faction(def, faction()) or M.native_selected[def.id] == true)
 end
 local function sync_native_pool()
+    elite_trace('sync: read pool', faction_name)
     local f, entries, expected = faction(), pool_entries(), {}
     for _, def in ipairs(STRATEGIC.units) do
         local key, wanted = def.native_key, native_wanted(def)
@@ -550,13 +577,16 @@ local function sync_native_pool()
         if wanted or entry then
             local count = wanted and POOL_STOCK or 0
             if not entry or entry.count ~= count or entry.max ~= count then
+                elite_trace('sync: pool add', key, count, entry and entry.count or 'new')
                 cm:add_unit_to_faction_mercenary_pool(f, key, POOL_SOURCE, count,
                     0, count, 0, faction_name, '', '', false, key)
+                elite_trace('sync: pool add done', key)
             end
             expected[key] = count
         end
     end
     -- Native per-army RoR limit (including Nagash's 2-slot limit).
+    elite_trace('sync: cap bundle', M.native_enabled)
     if M.native_enabled then
         local bundle = cm:create_new_custom_effect_bundle(PREFIX .. 'native_ror')
         if not bundle or bundle:is_null_interface() then error('缺少精英上限效果定义，请更新修改包') end
@@ -568,9 +598,11 @@ local function sync_native_pool()
     else
         cm:remove_effect_bundle(PREFIX .. 'native_ror', faction_name)
     end
+    elite_trace('sync: done')
     return expected
 end
 local function verify_native_pool(expected)
+    elite_trace('verify: read pool')
     local entries = pool_entries()
     for key, count in pairs(expected) do
         local entry = entries[key]
@@ -591,6 +623,7 @@ local function verify_native_pool(expected)
         end
     end
     if cap_found ~= M.native_enabled then error('精英军队数量上限效果未生效，请重试') end
+    elite_trace('verify: done')
 end
 local function native_recruitment_display()
     if type(find_uicomponent) ~= 'function' then return nil end
@@ -599,8 +632,12 @@ end
 local function arrange_native_cards()
     -- Native recruitment rebuilds its cards when the pool changes. Never retain
     -- UIComponent handles across callbacks: pcall cannot catch stale C++ pointers.
+    elite_trace('arrange: find display')
     local display = native_recruitment_display()
-    if not display or not display:Visible(true) then return end
+    if not display or not display:Visible(true) then
+        elite_trace('arrange: display closed')
+        return
+    end
     -- Collapse only matched pairs in this native list. Keep a marker ON the
     -- original so restoration never depends on a cached C++ UI handle.
     -- Off-screen cards still count: Visible(false) ignores scroll clipping.
@@ -642,8 +679,11 @@ local function arrange_native_cards()
             end
         end
     end
+    elite_trace('arrange: walk')
     walk(display, 0, nil, nil, false)
+    elite_trace('arrange: reveal', #cards, #boxes, 20000 - budget)
     elite_tabs.reveal(cards)
+    elite_trace('arrange: duplicates')
     for _, def in ipairs(STRATEGIC.units) do
         local unlocked = by_key[def.native_key]
         local original = by_key[def.id]
@@ -652,6 +692,7 @@ local function arrange_native_cards()
             local marker = address and UIComponent(address) or nil
             local replace = native_wanted(def) and unlocked and unlocked:Visible(false)
             if replace and original:Visible(false) then
+                elite_trace('arrange: hide original', def.id, marker and 'marked' or 'new marker')
                 if not marker then
                     marker = UIComponent(original:CreateComponent(PREFIX .. 'duplicate_hidden', 'ui/wh3pt/label'))
                     marker:SetVisible(false)
@@ -659,15 +700,19 @@ local function arrange_native_cards()
                 marker:SetStateText('hidden')
                 original:SetVisible(false)
             elseif not replace and marker and marker:GetStateText() == 'hidden' then
+                elite_trace('arrange: show original', def.id)
                 original:SetVisible(true)
                 marker:SetStateText('')
             end
         end
     end
+    elite_trace('arrange: tabs')
     local found = display:Find('mercenary_recruitment_pool_list', false)
     elite_tabs.apply(found and UIComponent(found) or nil, list_view, boxes, cards, M.native_enabled)
+    elite_trace('arrange: done')
 end
-local function schedule_native_sync(announce)
+local function schedule_native_sync(announce, reason)
+    elite_trace('schedule', reason or (announce and 'panel' or 'quiet'), native_pending and 'already pending' or '')
     if native_pending then return end
     native_pending = true
     player_callback(function()
@@ -676,13 +721,18 @@ local function schedule_native_sync(announce)
             local expected = sync_native_pool()
             local revision = native_revision
             player_callback(function()
-                if revision ~= native_revision then return end
+                if revision ~= native_revision then
+                    elite_trace('verify: superseded')
+                    return
+                end
                 guarded(function()
                     verify_native_pool(expected)
                     arrange_native_cards()
                     if announce then message(M.native_enabled and '已解锁精英，重复兵牌合并显示；请重开精英招募框' or '精英解锁已关闭；已招募部队保留') end
                 end)
+                elite_trace('render')
                 if render then guarded(render) end
+                elite_trace('render: done')
             end, 0.1)
         end)
     end, 0.1)
@@ -698,6 +748,7 @@ local function select_native_regiment(index)
     faction()
     native_revision = native_revision + 1
     local def = assert(STRATEGIC.units[index], '未知精英兵种')
+    elite_trace('click', def.id, M.native_selected[def.id] and 'remove' or 'add')
     if regiment_belongs_to_faction(def, faction()) then
         set_native_recruitment(not M.native_enabled)
         return
@@ -920,7 +971,7 @@ local function start()
         core:add_listener(name, event, true, function()
             guarded(function()
                 faction()
-                if M.native_enabled then schedule_native_sync(false) end
+                if M.native_enabled then schedule_native_sync(false, event) end
             end)
         end, true)
     end
@@ -929,7 +980,7 @@ local function start()
         if not M.native_enabled or type(c.string) ~= 'string' or substring(c.string, 1, #PREFIX) == PREFIX then return false end
         local display = native_recruitment_display()
         return display and display:Visible(true)
-    end, function() schedule_native_sync(false) end, true)
+    end, function(c) schedule_native_sync(false, 'native click ' .. tostring(c.string)) end, true)
     core:remove_listener('wh3pt_click')
     core:add_listener('wh3pt_click', 'ComponentLClickUp', function(c)
         return type(c.string) == 'string' and substring(c.string, 1, #PREFIX) == PREFIX
